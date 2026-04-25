@@ -16,5 +16,6 @@ function readEnv(name, fallback = undefined) {
 export const env = {
   port: Number(readEnv("PORT", "4000")),
   supabaseDbUrl: readEnv("SUPABASE_DB_URL"),
-  geminiKey: readEnv("GEMINI_KEY")
+  geminiKey: readEnv("GEMINI_KEY"),
+  patientUiBaseUrl: readEnv("PATIENT_UI_BASE_URL", "http://localhost:5173")
 };
