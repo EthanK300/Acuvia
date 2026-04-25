@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "check:structure": "echo \"backend scaffold present\"",
-    "dev": "node --watch src/server.js",
-    "start": "node src/server.js"
+    "dev": "NODE_OPTIONS=--dns-result-order=ipv4first node --watch src/server.js",
+    "start": "NODE_OPTIONS=--dns-result-order=ipv4first node src/server.js"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

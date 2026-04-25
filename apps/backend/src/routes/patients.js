@@ -14,6 +14,31 @@ import { uploadPatientMedia } from "../services/patientStorage.js";
 
 export const patientsRouter = Router();
 
+function normalizeNonEmptyString(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function isIsoDateOnly(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function normalizeMediaItems(input) {
+  if (!input) {
+    return [];
+  }
+  if (Array.isArray(input)) {
+    return input.filter((item) => item && typeof item === "object");
+  }
+  if (typeof input === "object") {
+    return [input];
+  }
+  return [];
+}
+
 function buildPatientWebsocketUrl(req, patientUuid) {
   const wsProtocol = req.protocol === "https" ? "wss" : "ws";
   const host = req.get("host");
@@ -64,11 +89,34 @@ patientsRouter.get("/session", async (req, res) => {
 // Create patient record from form submission and issue session.
 patientsRouter.post("/", async (req, res) => {
   try {
-    const { firstName, lastName, birthday } = req.body || {};
+    const rawBody = req.body;
+    const rawDescription =
+      typeof rawBody === "string"
+        ? rawBody
+        : rawBody?.description ?? rawBody?.data?.description ?? null;
+
+    const firstName = normalizeNonEmptyString(rawBody?.firstName);
+    const lastName = normalizeNonEmptyString(rawBody?.lastName);
+    const birthday = normalizeNonEmptyString(rawBody?.birthday);
+    const description = normalizeNonEmptyString(rawDescription);
+
     if (!firstName || !lastName || !birthday) {
+      if (description) {
+        return res.status(400).json({
+          ok: false,
+          message: "description accepted; firstName, lastName, and birthday are still required"
+        });
+      }
       return res.status(400).json({
         ok: false,
         message: "firstName, lastName, and birthday are required"
+      });
+    }
+
+    if (!isIsoDateOnly(birthday)) {
+      return res.status(400).json({
+        ok: false,
+        message: "birthday must use YYYY-MM-DD format"
       });
     }
 
@@ -77,6 +125,7 @@ patientsRouter.post("/", async (req, res) => {
       firstName,
       lastName,
       birthday,
+      description,
       sessionStart: startedAt,
       sessionExpiresAt: expiresAt
     });
@@ -91,6 +140,12 @@ patientsRouter.post("/", async (req, res) => {
     return res.status(201).json({
       ok: true,
       patientUuid: patient.uuid,
+      patient: {
+        firstName: patient.first_name,
+        lastName: patient.last_name,
+        birthday: patient.birthday,
+        description: patient.description
+      },
       sessionStart: patient.session_start,
       sessionExpiresAt: patient.session_expires_at,
       websocketUrl: buildPatientWebsocketUrl(req, patient.uuid),
@@ -128,40 +183,40 @@ patientsRouter.patch("/:patientUuid", async (req, res) => {
 
     const data = req.body?.data ?? req.body ?? {};
     const timestamp = req.body?.timestamp ?? Date.now();
+    if (Number.isNaN(new Date(timestamp).getTime())) {
+      return res.status(400).json({
+        ok: false,
+        message: "timestamp must be a valid date/time value"
+      });
+    }
 
-    let payload;
-    if (typeof data === "string") {
-      payload = {
-        type: "text",
-        text: data,
-        timestamp
-      };
-    } else if (
-      data &&
-      typeof data === "object" &&
-      data.type === "media" &&
-      typeof data.contentBase64 === "string"
-    ) {
+    const textValue =
+      typeof data === "string"
+        ? data
+        : normalizeNonEmptyString(data?.text) ?? normalizeNonEmptyString(req.body?.text);
+
+    const mediaItems = [
+      ...normalizeMediaItems(data?.media),
+      ...normalizeMediaItems(req.body?.media),
+      ...(data?.type === "media" ? [data] : [])
+    ].filter((item) => typeof item.contentBase64 === "string");
+
+    const uploads = [];
+    for (const mediaItem of mediaItems) {
       const upload = await uploadPatientMedia({
         patientUuid,
-        contentBase64: data.contentBase64,
-        mimeType: data.mimeType,
+        contentBase64: mediaItem.contentBase64,
+        mimeType: mediaItem.mimeType,
         timestamp
       });
-
-      payload = {
-        type: "media",
-        timestamp,
-        storage: upload,
-        text: typeof data.text === "string" ? data.text : undefined
-      };
-    } else {
-      payload = {
-        type: "text",
-        text: typeof data?.text === "string" ? data.text : JSON.stringify(data),
-        timestamp
-      };
+      uploads.push(upload);
     }
+
+    const payload = {
+      timestamp,
+      text: textValue ?? null,
+      media: uploads
+    };
 
     const saved = await insertPatientData({
       patientUuid,

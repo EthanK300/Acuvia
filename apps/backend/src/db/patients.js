@@ -15,14 +15,15 @@ export async function createPatientWithSession({
   firstName,
   lastName,
   birthday,
+  description,
   sessionStart,
   sessionExpiresAt
 }) {
   const result = await pool.query(
-    `insert into patients (first_name, last_name, birthday, session_start, session_expires_at)
-     values ($1, $2, $3, $4, $5)
-     returning uuid, session_start, session_expires_at`,
-    [firstName, lastName, birthday, sessionStart, sessionExpiresAt]
+    `insert into patients (first_name, last_name, birthday, description, session_start, session_expires_at)
+     values ($1, $2, $3, $4, $5, $6)
+     returning uuid, first_name, last_name, birthday, description, session_start, session_expires_at`,
+    [firstName, lastName, birthday, description ?? null, sessionStart, sessionExpiresAt]
   );
 
   return result.rows[0];
