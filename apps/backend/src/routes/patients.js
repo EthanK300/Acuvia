@@ -1,6 +1,4 @@
 import { Router } from "express";
-import { env } from "../config/env.js";
-import { buildPatientQrPdf } from "../services/patientPdf.js";
 
 export const patientsRouter = Router();
 
@@ -18,25 +16,4 @@ patientsRouter.patch("/:patientUuid", (_req, res) => {
     ok: false,
     message: "Not implemented: update patient"
   });
-});
-
-// Generate printable PDF with a general QR code to patient UI.
-patientsRouter.get("/qr-pdf", async (_req, res) => {
-  try {
-    const patientUrl = new URL(env.patientUiBaseUrl);
-
-    const pdfBuffer = await buildPatientQrPdf({
-      targetUrl: patientUrl.toString()
-    });
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", "inline; filename=\"patient-checkin-qr.pdf\"");
-    res.send(pdfBuffer);
-  } catch (error) {
-    res.status(500).json({
-      ok: false,
-      message: "Failed to generate patient QR PDF",
-      detail: error.message
-    });
-  }
 });
