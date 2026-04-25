@@ -1,0 +1,16 @@
+{
+  "name": "acuvia",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "setup": "echo \"Scaffold only. Add implementation inside apps/backend, apps/nurse-ui, and apps/patient-ui.\"",
+    "check:structure": "npm run check:structure --workspace backend && npm run check:structure --workspace nurse-ui && npm run check:structure --workspace patient-ui",
+    "dev:backend": "npm run dev --workspace backend",
+    "dev:nurse": "npm run start --workspace nurse-ui",
+    "dev:patient": "npm run dev --workspace patient-ui",
+    "build:patient": "npm run build --workspace patient-ui"
+  }
+}
