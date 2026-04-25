@@ -14,7 +14,19 @@ const port = env.port;
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws/patients" });
 
-app.use(express.json());
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", env.patientUiBaseUrl);
+  res.header("Access-Control-Allow-Credentials", "true");
+  res.header("Access-Control-Allow-Headers", "Content-Type");
+  res.header("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS");
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+
+  return next();
+});
+app.use(express.json({ limit: "50mb" }));
 app.use("/api/ai", aiRouter);
 app.use("/api/patients", patientsRouter);
 app.use("/api/nurses", nursesRouter);
