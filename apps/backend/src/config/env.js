@@ -17,5 +17,7 @@ export const env = {
   port: Number(readEnv("PORT", "4000")),
   supabaseDbUrl: readEnv("SUPABASE_DB_URL"),
   geminiKey: readEnv("GEMINI_KEY"),
-  patientUiBaseUrl: readEnv("PATIENT_UI_BASE_URL", "http://localhost:5173")
+  patientUiBaseUrl: readEnv("PATIENT_UI_BASE_URL", "http://localhost:5173"),
+  supabaseUrl: readEnv("SUPABASE_URL", ""),
+  supabaseServiceRoleKey: readEnv("SUPABASE_SERVICE_ROLE_KEY", "")
 };

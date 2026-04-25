@@ -20,3 +20,18 @@ export function unregisterPatientSocket(patientUuid, ws) {
 export function getPatientSocketCount() {
   return patientSockets.size;
 }
+
+export function sendPatientAlert(patientUuid, message) {
+  const ws = patientSockets.get(patientUuid);
+  if (!ws || ws.readyState !== 1) {
+    return false;
+  }
+
+  ws.send(
+    JSON.stringify({
+      type: "nurse-alert",
+      message
+    })
+  );
+  return true;
+}

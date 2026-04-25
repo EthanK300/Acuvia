@@ -2,7 +2,7 @@ import PDFDocument from "pdfkit";
 import QRCode from "qrcode";
 
 export async function buildPatientQrPdf({ targetUrl }) {
-  const qrBuffer = await QRCode.toBuffer("http://localhost:5173", {
+  const qrBuffer = await QRCode.toBuffer(targetUrl, {
     errorCorrectionLevel: "M",
     margin: 1,
     width: 512
