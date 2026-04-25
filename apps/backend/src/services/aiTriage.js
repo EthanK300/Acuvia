@@ -1,7 +1,7 @@
 import { getGeminiModel } from "./gemini.js";
 
 export const URGENCY_LEVELS = {
-  IMMINENT: "imminent",
+  CRITICAL: "critical",
   URGENT: "urgent",
   NOT_URGENT: "not urgent"
 };
@@ -31,15 +31,22 @@ export function normalizeTriageOutput(output) {
   const rating = Number(output.rating);
 
   if (!ALLOWED_URGENCY.has(urgency)) {
-    throw new Error("AI output urgency must be one of: imminent, urgent, not urgent");
+    throw new Error("AI output urgency must be one of: critical, urgent, not urgent");
   }
 
   if (!Number.isFinite(rating) || rating < 1 || rating > 100) {
     throw new Error("AI output rating must be a number from 1 to 100");
   }
 
+  const categoryByUrgency = {
+    [URGENCY_LEVELS.CRITICAL]: 1,
+    [URGENCY_LEVELS.URGENT]: 2,
+    [URGENCY_LEVELS.NOT_URGENT]: 3
+  };
+
   return {
     urgency,
+    category: categoryByUrgency[urgency],
     rating: Math.round(rating)
   };
 }
@@ -51,7 +58,7 @@ export async function classifyPatientMessage(message) {
   const prompt = [
     "You are a clinical triage assistant.",
     "Return JSON only with keys: urgency, rating.",
-    'urgency must be one of: "imminent", "urgent", "not urgent".',
+    'urgency must be one of: "critical", "urgent", "not urgent".',
     "rating must be an integer from 1 to 100.",
     "Input message JSON:",
     JSON.stringify(message)

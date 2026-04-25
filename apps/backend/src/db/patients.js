@@ -12,6 +12,7 @@ export async function getPatientBySessionUuid(patientUuid) {
 }
 
 export async function createPatientWithSession({
+  category,
   firstName,
   lastName,
   birthday,
@@ -20,10 +21,10 @@ export async function createPatientWithSession({
   sessionExpiresAt
 }) {
   const result = await pool.query(
-    `insert into patients (first_name, last_name, birthday, description, session_start, session_expires_at)
-     values ($1, $2, $3, $4, $5, $6)
-     returning uuid, first_name, last_name, birthday, description, session_start, session_expires_at`,
-    [firstName, lastName, birthday, description ?? null, sessionStart, sessionExpiresAt]
+    `insert into patients (category, first_name, last_name, birthday, description, session_start, session_expires_at)
+     values ($1, $2, $3, $4, $5, $6, $7)
+     returning uuid, category, first_name, last_name, birthday, description, session_start, session_expires_at`,
+    [category, firstName, lastName, birthday, description ?? null, sessionStart, sessionExpiresAt]
   );
 
   return result.rows[0];

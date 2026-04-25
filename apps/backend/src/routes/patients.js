@@ -13,6 +13,32 @@ import {
 import { uploadPatientMedia } from "../services/patientStorage.js";
 
 export const patientsRouter = Router();
+const CATEGORY_LABEL_TO_NUMBER = {
+  critical: 1,
+  urgent: 2,
+  "non urgent": 3
+};
+
+function normalizeCategory(category) {
+  if (typeof category === "number" && Number.isInteger(category)) {
+    return category;
+  }
+  if (typeof category === "string") {
+    const normalized = category.trim().toLowerCase();
+    if (normalized in CATEGORY_LABEL_TO_NUMBER) {
+      return CATEGORY_LABEL_TO_NUMBER[normalized];
+    }
+    const numeric = Number(normalized);
+    if (Number.isInteger(numeric)) {
+      return numeric;
+    }
+  }
+  return null;
+}
+
+function isValidCategory(category) {
+  return category === 1 || category === 2 || category === 3;
+}
 
 function normalizeNonEmptyString(value) {
   if (typeof value !== "string") {
@@ -90,26 +116,18 @@ patientsRouter.get("/session", async (req, res) => {
 patientsRouter.post("/", async (req, res) => {
   try {
     const rawBody = req.body;
-    const rawDescription =
-      typeof rawBody === "string"
-        ? rawBody
-        : rawBody?.description ?? rawBody?.data?.description ?? null;
 
     const firstName = normalizeNonEmptyString(rawBody?.firstName);
     const lastName = normalizeNonEmptyString(rawBody?.lastName);
     const birthday = normalizeNonEmptyString(rawBody?.birthday);
-    const description = normalizeNonEmptyString(rawDescription);
+    const description = normalizeNonEmptyString(rawBody?.description);
+    const category = normalizeCategory(rawBody?.category);
 
-    if (!firstName || !lastName || !birthday) {
-      if (description) {
-        return res.status(400).json({
-          ok: false,
-          message: "description accepted; firstName, lastName, and birthday are still required"
-        });
-      }
+    if (!firstName || !lastName || !birthday || !isValidCategory(category)) {
       return res.status(400).json({
         ok: false,
-        message: "firstName, lastName, and birthday are required"
+        message:
+          "firstName, lastName, birthday, and category are required (category: 1=critical, 2=urgent, 3=non urgent)"
       });
     }
 
@@ -122,6 +140,7 @@ patientsRouter.post("/", async (req, res) => {
 
     const { startedAt, expiresAt } = buildSessionWindow();
     const patient = await createPatientWithSession({
+      category,
       firstName,
       lastName,
       birthday,
@@ -141,6 +160,7 @@ patientsRouter.post("/", async (req, res) => {
       ok: true,
       patientUuid: patient.uuid,
       patient: {
+        category: patient.category,
         firstName: patient.first_name,
         lastName: patient.last_name,
         birthday: patient.birthday,
