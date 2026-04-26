@@ -372,23 +372,6 @@ export default function App() {
     recognition.start();
   }
 
-  async function submitMedia(patientId) {
-    for (const file of mediaFiles) {
-      addDebugLog("Uploading media", {
-        name: file.name,
-        type: file.type,
-        size: file.size
-      });
-      const contentBase64 = await fileToBase64(file);
-      await appendPatientHistory(patientId, {
-        type: "media",
-        contentBase64,
-        mimeType: file.type,
-        text: `Patient uploaded ${file.name}`
-      });
-    }
-  }
-
   async function handleSubmit(event) {
     event.preventDefault();
     setStatus("submitting");
@@ -432,12 +415,17 @@ export default function App() {
       }
 
       if (isExistingPatient) {
+        const updateMedia = await mediaFilesToPayload(mediaFiles);
         addDebugLog("Appending patient update JSON", {
           patientUuid: activePatientUuid,
-          payloadType: "patient_update"
+          payloadType: "patient_update",
+          mediaCount: updateMedia.length
         });
-        await appendPatientHistory(activePatientUuid, buildUpdateSummary(form));
-        await submitMedia(activePatientUuid);
+        await appendPatientHistory(activePatientUuid, {
+          ...buildUpdateSummary(form),
+          text: form.updateNote,
+          media: updateMedia
+        });
       }
 
       setStatus("submitted");

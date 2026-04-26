@@ -4,11 +4,19 @@ import {
   clearPatientRecords,
   getPatientStringSummary,
   listPatientDataHistory,
-  listTopPriorityPatients
+  insertPatientData,
+  listTopPriorityPatients,
+  updatePatientTriage
 } from "../db/patients.js";
 import { buildPatientQrPdf } from "../services/patientPdf.js";
+import { enqueueRankingEvent } from "../services/rankingQueue.js";
 import { sendPatientAlert } from "../services/patientSockets.js";
-import { clearPatientMedia, createPatientMediaSignedUrl } from "../services/patientStorage.js";
+import { clearPatientMedia, createPatientMediaSignedUrl, uploadPatientMedia } from "../services/patientStorage.js";
+import {
+  consumePendingPatientUpdate,
+  listPendingPatientUpdates,
+  rejectPendingPatientUpdate
+} from "../services/pendingPatientUpdates.js";
 
 export const nursesRouter = Router();
 
@@ -102,6 +110,152 @@ nursesRouter.post("/move", (_req, res) => {
     ok: false,
     message: "Not implemented: nurse move"
   });
+});
+
+nursesRouter.post("/update-webhook", async (req, res) => {
+  try {
+    const { patientUuid, pendingUpdateId, decision } = req.body || {};
+    if (!patientUuid) {
+      return res.status(400).json({
+        ok: false,
+        message: "patientUuid is required"
+      });
+    }
+    if (!pendingUpdateId) {
+      return res.status(400).json({
+        ok: false,
+        message: "pendingUpdateId is required"
+      });
+    }
+
+    const normalizedDecision = String(decision || "").toLowerCase();
+    if (!["approve", "reject"].includes(normalizedDecision)) {
+      return res.status(400).json({
+        ok: false,
+        message: "decision must be approve or reject"
+      });
+    }
+
+    if (normalizedDecision === "reject") {
+      const rejected = rejectPendingPatientUpdate({ patientUuid, pendingUpdateId });
+      if (!rejected) {
+        return res.status(404).json({
+          ok: false,
+          message: "Pending patient update not found"
+        });
+      }
+
+      const uploads = [];
+      for (const mediaItem of rejected.media || []) {
+        const upload = await uploadPatientMedia({
+          patientUuid,
+          contentBase64: mediaItem.contentBase64,
+          mimeType: mediaItem.mimeType,
+          timestamp: rejected.timestamp
+        });
+        uploads.push(upload);
+      }
+
+      const saved = await insertPatientData({
+        patientUuid,
+        payload: {
+          type: "patient_update",
+          timestamp: rejected.timestamp,
+          form: rejected.form,
+          text: rejected.text,
+          media: uploads,
+          nurseReview: {
+            status: "rejected",
+            reviewedAt: new Date().toISOString()
+          }
+        }
+      });
+
+      return res.json({
+        ok: true,
+        rejected: true,
+        pendingUpdateId,
+        dataId: saved.id
+      });
+    }
+
+    const pendingUpdate = consumePendingPatientUpdate({ patientUuid, pendingUpdateId });
+    if (!pendingUpdate) {
+      return res.status(404).json({
+        ok: false,
+        message: "Pending patient update not found"
+      });
+    }
+
+    const uploads = [];
+    for (const mediaItem of pendingUpdate.media || []) {
+      const upload = await uploadPatientMedia({
+        patientUuid,
+        contentBase64: mediaItem.contentBase64,
+        mimeType: mediaItem.mimeType,
+        timestamp: pendingUpdate.timestamp
+      });
+      uploads.push(upload);
+    }
+
+    const saved = await insertPatientData({
+      patientUuid,
+      payload: {
+        type: "patient_update",
+        timestamp: pendingUpdate.timestamp,
+        form: pendingUpdate.form,
+        text: pendingUpdate.text,
+        media: uploads,
+        nurseReview: {
+          status: "approved",
+          reviewedAt: new Date().toISOString()
+        }
+      }
+    });
+    const proposal = pendingUpdate.proposal || {};
+    if (!Number.isInteger(proposal.proposedCategory) || proposal.proposedCategory < 1 || proposal.proposedCategory > 5) {
+      return res.status(500).json({
+        ok: false,
+        message: "Pending update is missing a valid AI proposal"
+      });
+    }
+    await updatePatientTriage({
+      patientUuid,
+      category: proposal.proposedCategory,
+      description: proposal.proposedDescription,
+      numberRank: proposal.proposedRank
+    });
+    enqueueRankingEvent(patientUuid, "update-approved");
+
+    return res.json({
+      ok: true,
+      approved: true,
+      pendingUpdateId,
+      dataId: saved.id
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to process nurse update webhook",
+      detail: error.message
+    });
+  }
+});
+
+nursesRouter.get("/pending-updates", async (_req, res) => {
+  try {
+    const pendingUpdates = listPendingPatientUpdates();
+    return res.json({
+      ok: true,
+      updates: pendingUpdates
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to load pending patient updates",
+      detail: error.message
+    });
+  }
 });
 
 // Clear action from nurse control surface.

@@ -1,6 +1,6 @@
 import { StatusBar } from "expo-status-bar";
 import Constants from "expo-constants";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Image,
@@ -104,6 +104,34 @@ async function fetchPatientHistory(patientUuid) {
   }
 
   return Array.isArray(body.entries) ? body.entries : [];
+}
+
+async function fetchPendingUpdates() {
+  const response = await fetch(`${backendUrl}/api/nurses/pending-updates`);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || body.ok === false) {
+    throw new Error(body.message || `Pending updates request failed: ${response.status}`);
+  }
+  return Array.isArray(body.updates) ? body.updates : [];
+}
+
+async function submitUpdateWebhook({ patientUuid, pendingUpdateId, decision }) {
+  const response = await fetch(`${backendUrl}/api/nurses/update-webhook`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      patientUuid,
+      pendingUpdateId,
+      decision
+    })
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || body.ok === false) {
+    throw new Error(body.message || `Update webhook failed: ${response.status}`);
+  }
+  return body;
 }
 
 function formatElapsedSince(timestamp) {
@@ -228,8 +256,31 @@ function mapQueuePatient(row, index) {
     allergies: getFormValue(form, ["allergies", "allergy"]) || "N/A",
     duration: getFormValue(form, ["duration", "durationOfPain"]) || "Not specified",
     hadBefore: getFormValue(form, ["hadBefore", "previouslyHadThis"]) || "Not specified",
-    injuryTag: inferInjuryTag(description),
-    hasUpdate: Boolean(row.latest_payload_updated_at)
+    injuryTag: inferInjuryTag(description)
+  };
+}
+
+function mapPendingUpdate(update, patientsById) {
+  const patient = patientsById.get(update.patientUuid);
+  const submittedText = stringFromValue(update.text) || "No text provided";
+  const inferredDescription = patient?.description || submittedText;
+  const currentCategory = Number(update?.patientSnapshot?.currentCategory) || patient?.category || null;
+  const currentRank = Number(update?.patientSnapshot?.currentRank) || patient?.rank || null;
+  const proposedCategory = Number(update?.proposal?.proposedCategory) || currentCategory || 5;
+  const proposedRank = Number(update?.proposal?.proposedRank) || null;
+  return {
+    id: update.id,
+    patientUuid: update.patientUuid,
+    category: proposedCategory,
+    name: patient?.name || "Unknown Patient",
+    injuryTag: inferInjuryTag(inferredDescription),
+    submittedText,
+    updateTime: formatElapsedSince(update.submittedAt),
+    proposedDescription: stringFromValue(update?.proposal?.proposedDescription) || inferredDescription,
+    currentCategory,
+    currentRank,
+    proposedCategory,
+    proposedRank
   };
 }
 
@@ -469,10 +520,18 @@ function QueueCard({ patient, selected, onPress }) {
   );
 }
 
-function UpdateCard({ patient }) {
-  const rankMovement = getRankMovement(patient);
-  const hasPreviousRank = Number.isFinite(rankMovement.previousRank);
-
+function UpdateCard({ patient, pendingAction, onApprove, onReject }) {
+  const actionInProgress = Boolean(pendingAction);
+  const categoryChangeLabel =
+    patient.currentCategory && patient.proposedCategory
+      ? `${categoryToSeverity(patient.currentCategory)} -> ${categoryToSeverity(patient.proposedCategory)}`
+      : "No category proposal";
+  const rankChangeLabel =
+    patient.currentRank && patient.proposedRank
+      ? `#${patient.currentRank} -> #${patient.proposedRank}`
+      : patient.proposedRank
+        ? `-> #${patient.proposedRank}`
+        : "No rank proposal";
   return (
     <View style={styles.updateCard}>
       <View style={styles.updateMain}>
@@ -482,30 +541,27 @@ function UpdateCard({ patient }) {
         </View>
       </View>
       <Text style={styles.queueDescription} numberOfLines={2}>
-        {patient.submittedText}
+        {patient.proposedDescription}
       </Text>
-      <View
-        style={[
-          styles.rankMovementBox,
-          rankMovement.tone === "up" && styles.rankMovementBoxUp,
-          rankMovement.tone === "down" && styles.rankMovementBoxDown
-        ]}
-      >
-        {hasPreviousRank ? (
-          <>
-            <Text style={styles.rankMovementNumber}>{rankMovement.previousRank}</Text>
-            <Text style={styles.rankMovementArrow}>-&gt;</Text>
-          </>
-        ) : null}
-        <Text style={styles.rankMovementNumber}>{rankMovement.currentRank ?? "--"}</Text>
-      </View>
+      <Text style={styles.proposalText}>{categoryChangeLabel}</Text>
+      <Text style={styles.proposalText}>{rankChangeLabel}</Text>
       <View style={styles.updateFooter}>
         <Text style={styles.timeText}>{patient.updateTime}</Text>
         <View style={styles.updateActions}>
-          <Pressable accessibilityRole="button" style={[styles.updateActionButton, styles.acceptButton]}>
+          <Pressable
+            accessibilityRole="button"
+            disabled={actionInProgress}
+            onPress={() => onApprove(patient)}
+            style={[styles.updateActionButton, styles.acceptButton, actionInProgress && styles.updateActionButtonDisabled]}
+          >
             <Text style={styles.acceptText}>OK</Text>
           </Pressable>
-          <Pressable accessibilityRole="button" style={[styles.updateActionButton, styles.dismissButton]}>
+          <Pressable
+            accessibilityRole="button"
+            disabled={actionInProgress}
+            onPress={() => onReject(patient)}
+            style={[styles.updateActionButton, styles.dismissButton, actionInProgress && styles.updateActionButtonDisabled]}
+          >
             <Text style={styles.dismissText}>X</Text>
           </Pressable>
           <SeverityBadge category={patient.category} compact />
@@ -554,6 +610,7 @@ function FilterDropdown({ title, options, selectedValue, visible, onClose, onSel
 
 export default function App() {
   const [patients, setPatients] = useState([]);
+  const [pendingUpdates, setPendingUpdates] = useState([]);
   const [selectedPatientId, setSelectedPatientId] = useState("");
   const [isPatientModalVisible, setIsPatientModalVisible] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -566,28 +623,22 @@ export default function App() {
   const [patientHistory, setPatientHistory] = useState([]);
   const [patientHistoryError, setPatientHistoryError] = useState("");
   const [isPatientHistoryLoading, setIsPatientHistoryLoading] = useState(false);
-  const previousRanksRef = useRef(new Map());
+  const [pendingUpdateActionByPayloadId, setPendingUpdateActionByPayloadId] = useState({});
 
   const loadPatients = useCallback(async ({ showLoading = false } = {}) => {
     if (showLoading) {
       setIsRefreshing(true);
     }
     try {
-      const queueRows = await fetchPatients();
+      const [queueRows, pendingRows] = await Promise.all([fetchPatients(), fetchPendingUpdates()]);
       const mappedPatients = queueRows.map(mapQueuePatient);
-      const rankedPatients = mappedPatients.map((patient) => {
-        const previousRank = previousRanksRef.current.get(patient.id);
-        return {
-          ...patient,
-          previousRank: Number.isFinite(previousRank) ? previousRank : null,
-          rankDelta: Number.isFinite(previousRank) ? previousRank - patient.rank : 0
-        };
-      });
-      previousRanksRef.current = new Map(rankedPatients.map((patient) => [patient.id, patient.rank]));
-      setPatients(rankedPatients);
+      const patientsById = new Map(mappedPatients.map((patient) => [patient.id, patient]));
+      const mappedPendingUpdates = pendingRows.map((update) => mapPendingUpdate(update, patientsById));
+      setPatients(mappedPatients);
+      setPendingUpdates(mappedPendingUpdates);
       setQueueError("");
       setSelectedPatientId((currentId) => {
-        if (currentId && rankedPatients.some((patient) => patient.id === currentId)) {
+        if (currentId && mappedPatients.some((patient) => patient.id === currentId)) {
           return currentId;
         }
         setIsPatientModalVisible(false);
@@ -684,9 +735,49 @@ export default function App() {
       return matchesSearch && matchesSeverity && matchesInjury;
     });
   }, [injuryFilter, patients, searchQuery, severityFilter]);
-  const updates = filteredPatients
-    .filter((patient) => patient.previousRank != null && patient.previousRank !== patient.rank)
-    .slice(0, 6);
+  const updates = useMemo(() => {
+    const normalizedQuery = searchQuery.trim().toLowerCase();
+    return pendingUpdates.filter((update) => {
+      const matchesSearch =
+        !normalizedQuery ||
+        update.name.toLowerCase().includes(normalizedQuery) ||
+        update.submittedText.toLowerCase().includes(normalizedQuery) ||
+        update.injuryTag.toLowerCase().includes(normalizedQuery);
+      const matchesSeverity =
+        severityFilter === "All" || categoryToSeverity(update.category) === severityFilter;
+      const matchesInjury = injuryFilter === "All" || update.injuryTag === injuryFilter;
+      return matchesSearch && matchesSeverity && matchesInjury;
+    }).slice(0, 6);
+  }, [injuryFilter, pendingUpdates, searchQuery, severityFilter]);
+
+  const handleUpdateDecision = useCallback(async (patient, decision) => {
+    if (!patient?.patientUuid || !patient?.id) {
+      return;
+    }
+
+    const payloadKey = String(patient.id);
+    setPendingUpdateActionByPayloadId((current) => ({
+      ...current,
+      [payloadKey]: decision
+    }));
+
+    try {
+      await submitUpdateWebhook({
+        patientUuid: patient.patientUuid,
+        pendingUpdateId: patient.id,
+        decision
+      });
+      await loadPatients({ showLoading: false });
+    } catch (error) {
+      setQueueError(error.message || "Failed to process patient update");
+    } finally {
+      setPendingUpdateActionByPayloadId((current) => {
+        const next = { ...current };
+        delete next[payloadKey];
+        return next;
+      });
+    }
+  }, [loadPatients]);
 
   function toggleSearch() {
     setIsSearchVisible((isVisible) => {
@@ -818,12 +909,18 @@ export default function App() {
             </View>
             <View style={styles.cardStack}>
               {updates.map((patient) => (
-                <UpdateCard key={patient.id} patient={patient} />
+                <UpdateCard
+                  key={patient.id}
+                  patient={patient}
+                  pendingAction={pendingUpdateActionByPayloadId[String(patient.id)]}
+                  onApprove={(nextPatient) => handleUpdateDecision(nextPatient, "approve")}
+                  onReject={(nextPatient) => handleUpdateDecision(nextPatient, "reject")}
+                />
               ))}
               {updates.length === 0 ? (
                 <View style={styles.emptyQueueCard}>
-                  <Text style={styles.emptyQueueTitle}>No rank changes</Text>
-                  <Text style={styles.emptyQueueText}>Patient updates appear here only when priority changes.</Text>
+                  <Text style={styles.emptyQueueTitle}>No pending updates</Text>
+                  <Text style={styles.emptyQueueText}>Patient updates needing review will appear here.</Text>
                 </View>
               ) : null}
             </View>
@@ -1514,6 +1611,13 @@ const styles = StyleSheet.create({
     lineHeight: 21,
     marginTop: 8
   },
+  proposalText: {
+    color: "#5a5a5a",
+    fontFamily,
+    fontSize: 13,
+    lineHeight: 16,
+    marginTop: 4
+  },
   queueFooter: {
     alignItems: "center",
     flexDirection: "row",
@@ -1615,6 +1719,9 @@ const styles = StyleSheet.create({
     height: 26,
     justifyContent: "center",
     width: 44
+  },
+  updateActionButtonDisabled: {
+    opacity: 0.45
   },
   acceptButton: {
     backgroundColor: "rgba(137, 183, 72, 0.2)",

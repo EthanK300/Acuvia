@@ -4,8 +4,7 @@ import {
   getPatientDetails,
   getPatientBySessionUuid,
   insertPatientData,
-  listPatientDataHistory,
-  updatePatientTriage
+  listPatientDataHistory
 } from "../db/patients.js";
 import {
   buildSessionWindow,
@@ -14,8 +13,9 @@ import {
   readCookieValue
 } from "../services/session.js";
 import { classifyPatientIntake } from "../services/aiTriage.js";
-import { calculateInitialRankForCase, enqueueRankingEvent } from "../services/rankingQueue.js";
+import { calculateInitialRankForCase } from "../services/rankingQueue.js";
 import { uploadPatientMedia } from "../services/patientStorage.js";
+import { enqueuePendingPatientUpdate } from "../services/pendingPatientUpdates.js";
 
 export const patientsRouter = Router();
 
@@ -25,6 +25,10 @@ function normalizeNonEmptyString(value) {
   }
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : null;
+}
+
+function normalizeComparableText(value) {
+  return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
 function isIsoDateOnly(value) {
@@ -340,31 +344,9 @@ patientsRouter.patch("/:patientUuid", async (req, res) => {
       ...(data?.type === "media" ? [data] : [])
     ].filter((item) => typeof item.contentBase64 === "string");
 
-    const uploads = [];
-    for (const mediaItem of mediaItems) {
-      const upload = await uploadPatientMedia({
-        patientUuid,
-        contentBase64: mediaItem.contentBase64,
-        mimeType: mediaItem.mimeType,
-        timestamp
-      });
-      uploads.push(upload);
-    }
-    console.log("[patients] update media:uploaded", {
+    console.log("[patients] update pending-media:captured", {
       patientUuid,
-      mediaCount: uploads.length
-    });
-
-    const payload = {
-      timestamp,
-      form: formValue,
-      text: textValue ?? null,
-      media: uploads
-    };
-
-    const saved = await insertPatientData({
-      patientUuid,
-      payload
+      mediaCount: mediaItems.length
     });
 
     const patient = await getPatientDetails(patientUuid);
@@ -373,7 +355,12 @@ patientsRouter.patch("/:patientUuid", async (req, res) => {
     for (const row of history) {
       collectStringsFromValue(row.payload, historyStrings);
     }
-
+    if (textValue) {
+      historyStrings.push(textValue);
+    }
+    if (formValue) {
+      collectStringsFromValue(formValue, historyStrings);
+    }
     const recategorized = await classifyPatientIntake({
       firstName: patient?.first_name || "Unknown",
       lastName: patient?.last_name || "Unknown",
@@ -383,32 +370,67 @@ patientsRouter.patch("/:patientUuid", async (req, res) => {
         patient?.description ||
         "No incident details provided."
     });
-
-    const triage = await updatePatientTriage({
-      patientUuid,
+    const proposedRank = await calculateInitialRankForCase({
       category: recategorized.category,
-      description: recategorized.description
-    });
-    console.log("[patients] update recategorized", {
-      patientUuid,
-      previousCategory: patient?.category,
-      nextCategory: triage?.category
+      description: recategorized.description,
+      created_at: new Date(timestamp).toISOString(),
+      latest_payload: {
+        text: textValue ?? null,
+        form: formValue
+      }
+    }, {
+      requireAiComparison: true
     });
 
-    enqueueRankingEvent(patientUuid, "update");
-    console.log("[patients] update ranking:event-enqueued", {
+    const patientSnapshot = {
+      currentCategory: Number(patient?.category) || null,
+      currentRank: Number(patient?.number_rank) || null,
+      currentDescription: patient?.description || null
+    };
+    const proposal = {
+      proposedCategory: recategorized.category,
+      proposedRank,
+      proposedDescription: recategorized.description
+    };
+
+    const categoryChanged = patientSnapshot.currentCategory !== proposal.proposedCategory;
+    const rankChanged = patientSnapshot.currentRank !== proposal.proposedRank;
+    if (!categoryChanged && !rankChanged) {
+      console.log("[patients] update proposal:unchanged", {
+        patientUuid,
+        currentCategory: patientSnapshot.currentCategory,
+        currentRank: patientSnapshot.currentRank
+      });
+      return res.json({
+        ok: true,
+        pending: false,
+        unchanged: true,
+        message: "Update did not change ESI category or rank; no nurse review needed."
+      });
+    }
+
+    const pendingUpdate = enqueuePendingPatientUpdate({
       patientUuid,
-      reason: "update"
+      timestamp,
+      form: formValue,
+      text: textValue ?? null,
+      media: mediaItems,
+      patientSnapshot,
+      proposal
     });
-    console.log("[patients] update success", {
+    console.log("[patients] update pending:queued", {
       patientUuid,
-      dataId: saved.id
+      pendingUpdateId: pendingUpdate.id,
+      proposal
     });
 
     return res.json({
       ok: true,
-      dataId: saved.id,
-      updatedAt: saved.updated_at
+      pending: true,
+      pendingUpdateId: pendingUpdate.id,
+      submittedAt: pendingUpdate.submittedAt,
+      proposal,
+      message: "Your update was submitted and is awaiting nurse approval."
     });
   } catch (error) {
     console.error("[patients] update failed", error);

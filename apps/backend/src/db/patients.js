@@ -13,7 +13,7 @@ export async function getPatientBySessionUuid(patientUuid) {
 
 export async function getPatientDetails(patientUuid) {
   const result = await pool.query(
-    `select uuid, first_name, last_name, birthday, category, description, session_start, session_expires_at
+    `select uuid, first_name, last_name, birthday, category, number_rank, description, session_start, session_expires_at
      from patients
      where uuid = $1`,
     [patientUuid]
@@ -115,14 +115,15 @@ export async function listPatientDataHistory(patientUuid) {
   return result.rows;
 }
 
-export async function updatePatientTriage({ patientUuid, category, description }) {
+export async function updatePatientTriage({ patientUuid, category, description, numberRank = null }) {
   const result = await pool.query(
     `update patients
      set category = $1,
-         description = $2
-     where uuid = $3
-     returning uuid, category, description`,
-    [category, description, patientUuid]
+         description = $2,
+         number_rank = coalesce($3, number_rank)
+     where uuid = $4
+     returning uuid, category, number_rank, description`,
+    [category, description, numberRank, patientUuid]
   );
 
   return result.rows[0] || null;
@@ -170,11 +171,12 @@ export async function listTopPriorityPatients(limit = 50) {
        p.session_start,
        p.session_expires_at,
        p.created_at,
+       latest_data.id as latest_payload_id,
        latest_data.payload as latest_payload,
        latest_data.updated_at as latest_payload_updated_at
      from patients p
      left join lateral (
-       select pd.payload, pd.updated_at
+       select pd.id, pd.payload, pd.updated_at
        from patient_data pd
        where pd.patient_uuid = p.uuid
        order by pd.updated_at desc
@@ -186,6 +188,36 @@ export async function listTopPriorityPatients(limit = 50) {
   );
 
   return result.rows;
+}
+
+export async function markPatientUpdateReviewed({ payloadId, patientUuid, decision }) {
+  const normalizedDecision = String(decision || "").toLowerCase();
+  const mappedDecision =
+    normalizedDecision === "approve" || normalizedDecision === "approved"
+      ? "approved"
+      : normalizedDecision === "reject" || normalizedDecision === "rejected"
+        ? "rejected"
+        : "";
+  if (!mappedDecision) {
+    throw new Error("decision must be approve or reject");
+  }
+
+  const result = await pool.query(
+    `update patient_data
+     set payload = jsonb_set(
+       jsonb_set(payload, '{nurseReview,status}', to_jsonb($1::text), true),
+       '{nurseReview,reviewedAt}',
+       to_jsonb(now()::text),
+       true
+     )
+     where id = $2
+       and patient_uuid = $3
+       and coalesce(payload->>'type', '') = 'patient_update'
+     returning id, patient_uuid, payload, updated_at`,
+    [mappedDecision, payloadId, patientUuid]
+  );
+
+  return result.rows[0] || null;
 }
 
 export async function listCategoryPatientsForRanking(category) {
