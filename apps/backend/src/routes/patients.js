@@ -13,32 +13,6 @@ import {
 import { uploadPatientMedia } from "../services/patientStorage.js";
 
 export const patientsRouter = Router();
-const CATEGORY_LABEL_TO_NUMBER = {
-  critical: 1,
-  urgent: 2,
-  "non urgent": 3
-};
-
-function normalizeCategory(category) {
-  if (typeof category === "number" && Number.isInteger(category)) {
-    return category;
-  }
-  if (typeof category === "string") {
-    const normalized = category.trim().toLowerCase();
-    if (normalized in CATEGORY_LABEL_TO_NUMBER) {
-      return CATEGORY_LABEL_TO_NUMBER[normalized];
-    }
-    const numeric = Number(normalized);
-    if (Number.isInteger(numeric)) {
-      return numeric;
-    }
-  }
-  return null;
-}
-
-function isValidCategory(category) {
-  return category === 1 || category === 2 || category === 3;
-}
 
 function normalizeNonEmptyString(value) {
   if (typeof value !== "string") {
@@ -77,6 +51,9 @@ function buildPatientWebsocketUrl(req, patientUuid) {
 patientsRouter.get("/session", async (req, res) => {
   try {
     const sessionUuid = readCookieValue(req.headers.cookie, PATIENT_SESSION_COOKIE);
+    console.log("[patients] session check", {
+      hasCookie: Boolean(sessionUuid)
+    });
     if (!sessionUuid) {
       return res.json({
         ok: true,
@@ -104,6 +81,7 @@ patientsRouter.get("/session", async (req, res) => {
       next: "patient-updates"
     });
   } catch (error) {
+    console.error("[patients] session check failed", error);
     return res.status(500).json({
       ok: false,
       message: "Failed to check patient session",
@@ -116,18 +94,20 @@ patientsRouter.get("/session", async (req, res) => {
 patientsRouter.post("/", async (req, res) => {
   try {
     const rawBody = req.body;
+    console.log("[patients] create start", {
+      hasFirstName: Boolean(rawBody?.firstName),
+      hasLastName: Boolean(rawBody?.lastName),
+      hasBirthday: Boolean(rawBody?.birthday)
+    });
 
     const firstName = normalizeNonEmptyString(rawBody?.firstName);
     const lastName = normalizeNonEmptyString(rawBody?.lastName);
     const birthday = normalizeNonEmptyString(rawBody?.birthday);
-    const description = normalizeNonEmptyString(rawBody?.description);
-    const category = normalizeCategory(rawBody?.category);
 
-    if (!firstName || !lastName || !birthday || !isValidCategory(category)) {
+    if (!firstName || !lastName || !birthday) {
       return res.status(400).json({
         ok: false,
-        message:
-          "firstName, lastName, birthday, and category are required (category: 1=critical, 2=urgent, 3=non urgent)"
+        message: "firstName, lastName, and birthday are required"
       });
     }
 
@@ -140,13 +120,14 @@ patientsRouter.post("/", async (req, res) => {
 
     const { startedAt, expiresAt } = buildSessionWindow();
     const patient = await createPatientWithSession({
-      category,
       firstName,
       lastName,
       birthday,
-      description,
       sessionStart: startedAt,
       sessionExpiresAt: expiresAt
+    });
+    console.log("[patients] create success", {
+      patientUuid: patient.uuid
     });
 
     res.cookie(PATIENT_SESSION_COOKIE, patient.uuid, {
@@ -160,11 +141,9 @@ patientsRouter.post("/", async (req, res) => {
       ok: true,
       patientUuid: patient.uuid,
       patient: {
-        category: patient.category,
         firstName: patient.first_name,
         lastName: patient.last_name,
-        birthday: patient.birthday,
-        description: patient.description
+        birthday: patient.birthday
       },
       sessionStart: patient.session_start,
       sessionExpiresAt: patient.session_expires_at,
@@ -172,6 +151,7 @@ patientsRouter.post("/", async (req, res) => {
       next: "patient-updates"
     });
   } catch (error) {
+    console.error("[patients] create failed", error);
     return res.status(500).json({
       ok: false,
       message: "Failed to create patient session",
@@ -185,6 +165,12 @@ patientsRouter.patch("/:patientUuid", async (req, res) => {
   try {
     const { patientUuid } = req.params;
     const sessionUuid = readCookieValue(req.headers.cookie, PATIENT_SESSION_COOKIE);
+    console.log("[patients] update start", {
+      patientUuid,
+      hasCookie: Boolean(sessionUuid),
+      cookieMatchesPatient: sessionUuid === patientUuid,
+      payloadKeys: req.body && typeof req.body === "object" ? Object.keys(req.body) : []
+    });
     if (!sessionUuid || sessionUuid !== patientUuid) {
       return res.status(401).json({
         ok: false,
@@ -214,6 +200,13 @@ patientsRouter.patch("/:patientUuid", async (req, res) => {
       typeof data === "string"
         ? data
         : normalizeNonEmptyString(data?.text) ?? normalizeNonEmptyString(req.body?.text);
+    const formValue =
+      data &&
+      typeof data === "object" &&
+      data.type !== "media" &&
+      typeof data.contentBase64 !== "string"
+        ? data
+        : null;
 
     const mediaItems = [
       ...normalizeMediaItems(data?.media),
@@ -234,6 +227,7 @@ patientsRouter.patch("/:patientUuid", async (req, res) => {
 
     const payload = {
       timestamp,
+      form: formValue,
       text: textValue ?? null,
       media: uploads
     };
@@ -242,6 +236,10 @@ patientsRouter.patch("/:patientUuid", async (req, res) => {
       patientUuid,
       payload
     });
+    console.log("[patients] update success", {
+      patientUuid,
+      dataId: saved.id
+    });
 
     return res.json({
       ok: true,
@@ -249,6 +247,7 @@ patientsRouter.patch("/:patientUuid", async (req, res) => {
       updatedAt: saved.updated_at
     });
   } catch (error) {
+    console.error("[patients] update failed", error);
     return res.status(500).json({
       ok: false,
       message: "Failed to update patient data",
@@ -256,4 +255,3 @@ patientsRouter.patch("/:patientUuid", async (req, res) => {
     });
   }
 });
-

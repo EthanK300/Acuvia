@@ -2,8 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import acuviaLogo from "./assets/acuvia-logo.png";
 import "./App.css";
 
-const backendUrl = import.meta.env.VITE_BACKEND_URL || "http://localhost:4000";
-const patientsApiUrl = `${backendUrl}/api/patients`;
+const apiBaseUrl = import.meta.env.VITE_BACKEND_URL || "";
+const backendUrl = apiBaseUrl || "same-origin /api proxy";
+const patientsApiUrl = `${apiBaseUrl}/api/patients`;
+const DEBUG_PREFIX = "[patient-ui]";
 
 const initialForm = {
   firstName: "",
@@ -51,21 +53,55 @@ const selectFields = [
 const durationOptions = ["Just Started", "A Few Hours", "More than a Day"];
 
 async function requestJson(url, options = {}) {
-  const response = await fetch(url, {
-    credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers || {})
-    },
-    ...options
+  const method = options.method || "GET";
+  console.info(`${DEBUG_PREFIX} request:start`, {
+    method,
+    url,
+    pageOrigin: window.location.origin,
+    backendUrl
   });
 
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload.ok === false) {
-    throw new Error(payload.message || "Request failed");
-  }
+  try {
+    const response = await fetch(url, {
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        ...(options.headers || {})
+      },
+      ...options
+    });
 
-  return payload;
+    const payload = await response.json().catch(() => ({}));
+    console.info(`${DEBUG_PREFIX} request:finish`, {
+      method,
+      url,
+      status: response.status,
+      payload
+    });
+
+    if (!response.ok || payload.ok === false) {
+      throw new Error(payload.message || "Request failed");
+    }
+
+    return payload;
+  } catch (error) {
+    console.error(`${DEBUG_PREFIX} request:error`, {
+      method,
+      url,
+      message: error.message,
+      online: navigator.onLine
+    });
+    throw error;
+  }
+}
+
+function buildLogEntry(message, detail = {}) {
+  return {
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    time: new Date().toLocaleTimeString(),
+    message,
+    detail
+  };
 }
 
 async function checkPatientSession() {
@@ -91,22 +127,23 @@ async function appendPatientHistory(patientUuid, data) {
 
 function buildClinicalSummary(form) {
   return {
-    type: "text",
-    text: JSON.stringify(
-      {
-        areaOfPain: form.areaOfPain,
-        painLevel: form.painLevel,
-        urgentSymptoms: form.urgentSymptoms,
-        medication: form.medication,
-        allergies: form.allergies,
-        painDuration: form.painDuration,
-        hasHadBefore: form.hasHadBefore,
-        reason: form.reason,
-        updateNote: form.updateNote
-      },
-      null,
-      2
-    )
+    type: "patient_intake",
+    areaOfPain: form.areaOfPain,
+    painLevel: form.painLevel,
+    urgentSymptoms: form.urgentSymptoms,
+    medication: form.medication,
+    allergies: form.allergies,
+    painDuration: form.painDuration,
+    hasHadBefore: form.hasHadBefore,
+    reason: form.reason,
+    updateNote: form.updateNote
+  };
+}
+
+function buildUpdateSummary(form) {
+  return {
+    type: "patient_update",
+    description: form.updateNote
   };
 }
 
@@ -138,14 +175,26 @@ export default function App() {
   const [status, setStatus] = useState("idle");
   const [message, setMessage] = useState("");
   const [isListening, setIsListening] = useState(false);
+  const [debugLogs, setDebugLogs] = useState(() => [
+    buildLogEntry("Patient UI loaded", {
+      page: window.location.href,
+      backendUrl
+    })
+  ]);
 
   const isExistingPatient = mode === "update" && patientUuid;
+
+  function addDebugLog(logMessage, detail = {}) {
+    console.info(`${DEBUG_PREFIX} ${logMessage}`, detail);
+    setDebugLogs((current) => [buildLogEntry(logMessage, detail), ...current].slice(0, 8));
+  }
 
   useEffect(() => {
     let isMounted = true;
 
     checkPatientSession()
       .then((session) => {
+        addDebugLog("Session check finished", session);
         if (!isMounted || !session.hasSession) {
           return;
         }
@@ -154,7 +203,11 @@ export default function App() {
         setMode("update");
         setMessage("Existing patient session found. Updates will be added to your history.");
       })
-      .catch(() => {
+      .catch((error) => {
+        addDebugLog("Session check failed", {
+          message: error.message,
+          backendUrl
+        });
         if (isMounted) {
           setMessage("");
         }
@@ -188,7 +241,7 @@ export default function App() {
     setMediaFiles(Array.from(event.target.files || []));
   }
 
-  function handleSpeechToText() {
+  function handleSpeechToText(fieldName) {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
@@ -223,7 +276,7 @@ export default function App() {
         return;
       }
 
-      updateField("reason", form.reason ? `${form.reason} ${transcript}` : transcript);
+      updateField(fieldName, form[fieldName] ? `${form[fieldName]} ${transcript}` : transcript);
       setStatus("idle");
       setMessage("");
     };
@@ -233,6 +286,11 @@ export default function App() {
 
   async function submitMedia(patientId) {
     for (const file of mediaFiles) {
+      addDebugLog("Uploading media", {
+        name: file.name,
+        type: file.type,
+        size: file.size
+      });
       const contentBase64 = await fileToBase64(file);
       await appendPatientHistory(patientId, {
         type: "media",
@@ -247,11 +305,22 @@ export default function App() {
     event.preventDefault();
     setStatus("submitting");
     setMessage("");
+    addDebugLog("Submit started", {
+      mode,
+      isExistingPatient: Boolean(isExistingPatient),
+      backendUrl,
+      mediaCount: mediaFiles.length
+    });
 
     try {
       let activePatientUuid = patientUuid;
 
       if (!activePatientUuid) {
+        addDebugLog("Creating patient row", {
+          firstName: form.firstName.trim(),
+          lastName: form.lastName.trim(),
+          birthday: form.birthday
+        });
         const created = await createPatientEntry({
           firstName: form.firstName.trim(),
           lastName: form.lastName.trim(),
@@ -260,12 +329,25 @@ export default function App() {
         activePatientUuid = created.patientUuid;
         setPatientUuid(activePatientUuid);
         setMode("update");
+        addDebugLog("Patient row created", {
+          patientUuid: activePatientUuid
+        });
       }
 
-      await appendPatientHistory(activePatientUuid, buildClinicalSummary(form));
+      addDebugLog("Appending patient JSON", {
+        patientUuid: activePatientUuid,
+        payloadType: isExistingPatient ? "patient_update" : "patient_intake"
+      });
+      await appendPatientHistory(
+        activePatientUuid,
+        isExistingPatient ? buildUpdateSummary(form) : buildClinicalSummary(form)
+      );
       await submitMedia(activePatientUuid);
 
       setStatus("submitted");
+      addDebugLog("Submit finished", {
+        patientUuid: activePatientUuid
+      });
       setMessage(
         isExistingPatient
           ? "Your update was added to your medical history."
@@ -275,7 +357,12 @@ export default function App() {
       updateField("updateNote", "");
     } catch (error) {
       setStatus("error");
-      setMessage(error.message);
+      addDebugLog("Submit failed", {
+        message: error.message,
+        backendUrl,
+        page: window.location.href
+      });
+      setMessage(`Submission failed: ${error.message}. Backend: ${backendUrl}`);
     }
   }
 
@@ -318,137 +405,150 @@ export default function App() {
         ) : null}
 
         <form className={status === "submitted" ? "hidden-form" : ""} onSubmit={handleSubmit}>
-          {!isExistingPatient ? (
-            <fieldset className="identity-grid">
-              <label>
-                First Name <strong>*</strong>
-                <input
-                  required
-                  value={form.firstName}
-                  onChange={(event) => updateField("firstName", event.target.value)}
-                  placeholder="First"
-                />
-              </label>
-              <label>
-                Last Name <strong>*</strong>
-                <input
-                  required
-                  value={form.lastName}
-                  onChange={(event) => updateField("lastName", event.target.value)}
-                  placeholder="Last"
-                />
-              </label>
-              <label>
-                Birthday <strong>*</strong>
-                <input
-                  required
-                  type="date"
-                  value={form.birthday}
-                  onChange={(event) => updateField("birthday", event.target.value)}
-                />
-              </label>
-            </fieldset>
-          ) : null}
-
-          {selectFields.map((field) => (
-            <label className="field-label" key={field.id}>
-              {field.label}
-              <strong>*</strong>
-              <span className="select-wrap">
-                <select
-                  required
-                  value={form[field.id]}
-                  onChange={(event) => updateField(field.id, event.target.value)}
-                >
-                  <option value="">Select</option>
-                  {field.options.map((option) => (
-                    <option key={option} value={option}>
-                      {option}
-                    </option>
-                  ))}
-                </select>
-                {form[field.id] ? (
-                  <button type="button" aria-label={`Clear ${field.label}`} onClick={() => clearField(field.id)}>
-                    x
-                  </button>
-                ) : null}
-              </span>
-            </label>
-          ))}
-
-          <fieldset className="radio-group">
-            <legend>
-              Duration of Pain <strong>*</strong>
-            </legend>
-            {durationOptions.map((option) => (
-              <label key={option}>
-                <input
-                  required
-                  checked={form.painDuration === option}
-                  name="painDuration"
-                  type="radio"
-                  value={option}
-                  onChange={(event) => updateField("painDuration", event.target.value)}
-                />
-                {option}
-              </label>
-            ))}
-          </fieldset>
-
-          <label className="field-label">
-            Have you had this before?
-            <strong>*</strong>
-            <span className="select-wrap">
-              <select
-                required
-                value={form.hasHadBefore}
-                onChange={(event) => updateField("hasHadBefore", event.target.value)}
-              >
-                <option value="">Select</option>
-                <option value="No">No</option>
-                <option value="Yes">Yes</option>
-                <option value="Not sure">Not sure</option>
-              </select>
-              {form.hasHadBefore ? (
-                <button type="button" aria-label="Clear Have you had this before" onClick={() => clearField("hasHadBefore")}>
-                  x
-                </button>
-              ) : null}
-            </span>
-          </label>
-
-          <label className="field-label">
-            What is the main reason you're here today?
-            <strong>*</strong>
-            <button
-              type="button"
-              className={`microphone-button ${isListening ? "listening" : ""}`}
-              onClick={handleSpeechToText}
-              aria-label="Use microphone for speech to text"
-            >
-              <svg aria-hidden="true" viewBox="0 0 24 24">
-                <path d="M12 14c1.66 0 3-1.34 3-3V6c0-1.66-1.34-3-3-3S9 4.34 9 6v5c0 1.66 1.34 3 3 3Z" />
-                <path d="M17.3 11c0 2.93-2.38 5.3-5.3 5.3S6.7 13.93 6.7 11H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-1.7Z" />
-              </svg>
-            </button>
-            <textarea
-              required
-              value={form.reason}
-              onChange={(event) => updateField("reason", event.target.value)}
-              placeholder="i.e. what type of pain are you feeling?"
-            />
-          </label>
-
           {isExistingPatient ? (
             <label className="field-label">
               What has changed since your last update?
+              <strong>*</strong>
+              <button
+                type="button"
+                className={`microphone-button ${isListening ? "listening" : ""}`}
+                onClick={() => handleSpeechToText("updateNote")}
+                aria-label="Use microphone for speech to text"
+              >
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="M12 14c1.66 0 3-1.34 3-3V6c0-1.66-1.34-3-3-3S9 4.34 9 6v5c0 1.66 1.34 3 3 3Z" />
+                  <path d="M17.3 11c0 2.93-2.38 5.3-5.3 5.3S6.7 13.93 6.7 11H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-1.7Z" />
+                </svg>
+              </button>
               <textarea
+                required
                 value={form.updateNote}
                 onChange={(event) => updateField("updateNote", event.target.value)}
                 placeholder="Describe any changes to your condition."
               />
             </label>
-          ) : null}
+          ) : (
+            <>
+              <fieldset className="identity-grid">
+                <label>
+                  First Name <strong>*</strong>
+                  <input
+                    required
+                    value={form.firstName}
+                    onChange={(event) => updateField("firstName", event.target.value)}
+                    placeholder="First"
+                  />
+                </label>
+                <label>
+                  Last Name <strong>*</strong>
+                  <input
+                    required
+                    value={form.lastName}
+                    onChange={(event) => updateField("lastName", event.target.value)}
+                    placeholder="Last"
+                  />
+                </label>
+                <label>
+                  Birthday <strong>*</strong>
+                  <input
+                    required
+                    type="date"
+                    value={form.birthday}
+                    onChange={(event) => updateField("birthday", event.target.value)}
+                  />
+                </label>
+              </fieldset>
+
+              {selectFields.map((field) => (
+                <label className="field-label" key={field.id}>
+                  {field.label}
+                  <strong>*</strong>
+                  <span className="select-wrap">
+                    <select
+                      required
+                      value={form[field.id]}
+                      onChange={(event) => updateField(field.id, event.target.value)}
+                    >
+                      <option value="">Select</option>
+                      {field.options.map((option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
+                    </select>
+                    {form[field.id] ? (
+                      <button type="button" aria-label={`Clear ${field.label}`} onClick={() => clearField(field.id)}>
+                        x
+                      </button>
+                    ) : null}
+                  </span>
+                </label>
+              ))}
+
+              <fieldset className="radio-group">
+                <legend>
+                  Duration of Pain <strong>*</strong>
+                </legend>
+                {durationOptions.map((option) => (
+                  <label key={option}>
+                    <input
+                      required
+                      checked={form.painDuration === option}
+                      name="painDuration"
+                      type="radio"
+                      value={option}
+                      onChange={(event) => updateField("painDuration", event.target.value)}
+                    />
+                    {option}
+                  </label>
+                ))}
+              </fieldset>
+
+              <label className="field-label">
+                Have you had this before?
+                <strong>*</strong>
+                <span className="select-wrap">
+                  <select
+                    required
+                    value={form.hasHadBefore}
+                    onChange={(event) => updateField("hasHadBefore", event.target.value)}
+                  >
+                    <option value="">Select</option>
+                    <option value="No">No</option>
+                    <option value="Yes">Yes</option>
+                    <option value="Not sure">Not sure</option>
+                  </select>
+                  {form.hasHadBefore ? (
+                    <button type="button" aria-label="Clear Have you had this before" onClick={() => clearField("hasHadBefore")}>
+                      x
+                    </button>
+                  ) : null}
+                </span>
+              </label>
+
+              <label className="field-label">
+                What is the main reason you're here today?
+                <strong>*</strong>
+                <button
+                  type="button"
+                  className={`microphone-button ${isListening ? "listening" : ""}`}
+                  onClick={() => handleSpeechToText("reason")}
+                  aria-label="Use microphone for speech to text"
+                >
+                  <svg aria-hidden="true" viewBox="0 0 24 24">
+                    <path d="M12 14c1.66 0 3-1.34 3-3V6c0-1.66-1.34-3-3-3S9 4.34 9 6v5c0 1.66 1.34 3 3 3Z" />
+                    <path d="M17.3 11c0 2.93-2.38 5.3-5.3 5.3S6.7 13.93 6.7 11H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-1.7Z" />
+                  </svg>
+                </button>
+                <textarea
+                  required
+                  value={form.reason}
+                  onChange={(event) => updateField("reason", event.target.value)}
+                  placeholder="i.e. what type of pain are you feeling?"
+                />
+              </label>
+            </>
+          )}
 
           <label className="field-label">
             Attach photos or videos
@@ -463,6 +563,19 @@ export default function App() {
             {submitButtonText}
           </button>
         </form>
+
+        <details className="debug-panel">
+          <summary>Submission logs</summary>
+          <p>Backend: {backendUrl}</p>
+          <ol>
+            {debugLogs.map((log) => (
+              <li key={log.id}>
+                <strong>{log.time}</strong> {log.message}
+                <pre>{JSON.stringify(log.detail, null, 2)}</pre>
+              </li>
+            ))}
+          </ol>
+        </details>
       </section>
     </main>
   );
