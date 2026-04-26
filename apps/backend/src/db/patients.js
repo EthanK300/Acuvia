@@ -100,3 +100,64 @@ export async function listTopPriorityPatients(limit = 50) {
 
   return result.rows;
 }
+
+function collectStringsFromValue(value, collector) {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.length > 0) {
+      collector.push(trimmed);
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectStringsFromValue(item, collector);
+    }
+    return;
+  }
+
+  if (value && typeof value === "object") {
+    for (const item of Object.values(value)) {
+      collectStringsFromValue(item, collector);
+    }
+  }
+}
+
+export async function getPatientStringSummary(patientUuid) {
+  const patientResult = await pool.query(
+    `select uuid, first_name, last_name, description
+     from patients
+     where uuid = $1`,
+    [patientUuid]
+  );
+
+  const patient = patientResult.rows[0] || null;
+  if (!patient) {
+    return null;
+  }
+
+  const dataResult = await pool.query(
+    `select payload
+     from patient_data
+     where patient_uuid = $1
+     order by updated_at desc`,
+    [patientUuid]
+  );
+
+  const strings = [];
+  if (patient.description) {
+    strings.push(patient.description);
+  }
+
+  for (const row of dataResult.rows) {
+    collectStringsFromValue(row.payload, strings);
+  }
+
+  return {
+    patientUuid: patient.uuid,
+    patientName: `${patient.first_name} ${patient.last_name}`.trim(),
+    strings,
+    summary: strings.length > 0 ? strings.join(" | ") : "only media"
+  };
+}

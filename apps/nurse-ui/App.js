@@ -71,9 +71,14 @@ function mapQueuePatient(row) {
   };
 }
 
-function handlePatientSelect(patientId) {
-  // Future implementation: navigate to patient detail and care tasks.
-  return patientId;
+async function fetchPatientSummary(patientUuid) {
+  const response = await fetch(`${backendUrl}/api/nurses/patient/${patientUuid}/summary`);
+  if (!response.ok) {
+    throw new Error(`Summary request failed: ${response.status}`);
+  }
+
+  const body = await response.json();
+  return body.summary?.summary || "only media";
 }
 
 function requestDownloadableAppBuild() {
@@ -94,6 +99,8 @@ export default function App() {
   const [patients, setPatients] = useState([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [queueError, setQueueError] = useState("");
+  const [selectedPatientSummary, setSelectedPatientSummary] = useState("");
+  const [selectedPatientLabel, setSelectedPatientLabel] = useState("");
 
   const loadPatients = useCallback(async () => {
     setIsRefreshing(true);
@@ -117,6 +124,17 @@ export default function App() {
   function handleRefreshPatients() {
     loadPatients();
   }
+
+  const handlePatientSelect = useCallback(async (patient) => {
+    try {
+      const summary = await fetchPatientSummary(patient.id);
+      setSelectedPatientLabel(patient.name);
+      setSelectedPatientSummary(summary);
+    } catch (error) {
+      setSelectedPatientLabel(patient.name);
+      setSelectedPatientSummary(error.message || "Failed to load patient summary");
+    }
+  }, []);
 
   const prioritizedPatients = useMemo(() => patients, [patients]);
 
@@ -170,7 +188,7 @@ export default function App() {
             <Pressable
               accessibilityRole="button"
               key={patient.id}
-              onPress={() => handlePatientSelect(patient.id)}
+              onPress={() => handlePatientSelect(patient)}
               style={styles.patientCard}
             >
               <View style={styles.patientTopRow}>
@@ -207,6 +225,13 @@ export default function App() {
       </ScrollView>
 
       <View style={styles.footer}>
+        {selectedPatientSummary ? (
+          <View style={styles.summaryPanelSelected}>
+            <Text style={styles.backendLabel}>Selected Patient</Text>
+            <Text style={styles.backendValue}>{selectedPatientLabel}</Text>
+            <Text style={styles.selectedSummaryText}>{selectedPatientSummary}</Text>
+          </View>
+        ) : null}
         <View style={styles.backendPanel}>
           <Text style={styles.backendLabel}>Backend</Text>
           <Text style={styles.backendValue}>{backendUrl}</Text>
@@ -420,6 +445,21 @@ const styles = StyleSheet.create({
   },
   backendPanel: {
     gap: 2
+  },
+  summaryPanelSelected: {
+    backgroundColor: "#f3f7ff",
+    borderColor: "#cddcf5",
+    borderRadius: 8,
+    borderWidth: 1,
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 10
+  },
+  selectedSummaryText: {
+    color: "#263241",
+    fontSize: 12,
+    fontWeight: "500",
+    lineHeight: 17
   },
   backendLabel: {
     color: "#6a7585",

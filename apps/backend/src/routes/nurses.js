@@ -1,6 +1,10 @@
 import { Router } from "express";
 import { env } from "../config/env.js";
-import { clearPatientRecords, listTopPriorityPatients } from "../db/patients.js";
+import {
+  clearPatientRecords,
+  getPatientStringSummary,
+  listTopPriorityPatients
+} from "../db/patients.js";
 import { buildPatientQrPdf } from "../services/patientPdf.js";
 import { sendPatientAlert } from "../services/patientSockets.js";
 import { clearPatientMedia } from "../services/patientStorage.js";
@@ -18,6 +22,30 @@ nursesRouter.get("/queue", async (_req, res) => {
     return res.status(500).json({
       ok: false,
       message: "Failed to load nurse queue",
+      detail: error.message
+    });
+  }
+});
+
+nursesRouter.get("/patient/:patientUuid/summary", async (req, res) => {
+  try {
+    const { patientUuid } = req.params;
+    const summary = await getPatientStringSummary(patientUuid);
+    if (!summary) {
+      return res.status(404).json({
+        ok: false,
+        message: "Patient not found"
+      });
+    }
+
+    return res.json({
+      ok: true,
+      summary
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to load patient summary",
       detail: error.message
     });
   }
