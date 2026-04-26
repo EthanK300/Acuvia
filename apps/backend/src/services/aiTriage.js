@@ -103,6 +103,12 @@ export function normalizeIntakeOutput(output) {
 }
 
 export async function classifyPatientIntake(intake) {
+  console.log("[ai-triage] intake classification request", {
+    hasFirstName: Boolean(intake?.firstName),
+    hasLastName: Boolean(intake?.lastName),
+    hasBirthday: Boolean(intake?.birthday),
+    hasIncident: Boolean(intake?.incident)
+  });
   const model = getGeminiModel();
   const prompt = [
     "You are an emergency triage assistant.",
@@ -117,7 +123,12 @@ export async function classifyPatientIntake(intake) {
   const result = await model.generateContent(prompt);
   const raw = result.response.text();
   const parsed = parseJsonFromModelText(raw);
-  return normalizeIntakeOutput(parsed);
+  const normalized = normalizeIntakeOutput(parsed);
+  console.log("[ai-triage] intake classification response", {
+    category: normalized.category,
+    hasDescription: Boolean(normalized.description)
+  });
+  return normalized;
 }
 
 function waitMinutesFromTimestamp(timestamp) {
@@ -145,6 +156,10 @@ function normalizeCaseComparisonOutput(output) {
 }
 
 export async function compareCasesForRanking(targetCase, referenceCase) {
+  console.log("[ai-triage] ranking comparison request", {
+    targetHasDescription: Boolean(targetCase?.description),
+    referenceHasDescription: Boolean(referenceCase?.description)
+  });
   const model = getGeminiModel();
   const prompt = [
     "You are an emergency triage ranking assistant.",
@@ -177,5 +192,9 @@ export async function compareCasesForRanking(targetCase, referenceCase) {
   const result = await model.generateContent(prompt);
   const raw = result.response.text();
   const parsed = parseJsonFromModelText(raw);
-  return normalizeCaseComparisonOutput(parsed);
+  const normalized = normalizeCaseComparisonOutput(parsed);
+  console.log("[ai-triage] ranking comparison response", {
+    verdict: normalized.verdict
+  });
+  return normalized;
 }

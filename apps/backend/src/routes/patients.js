@@ -96,26 +96,30 @@ patientsRouter.get("/session", async (req, res) => {
 patientsRouter.post("/", async (req, res) => {
   try {
     const rawBody = req.body;
-    console.log("[patients] create start", {
+    console.log("[patients] create received", {
       hasFirstName: Boolean(rawBody?.firstName),
       hasLastName: Boolean(rawBody?.lastName),
-      hasBirthday: Boolean(rawBody?.birthday)
+      hasBirthday: Boolean(rawBody?.birthday),
+      hasNotes: Boolean(rawBody?.notes),
+      hasIncident: Boolean(rawBody?.incident),
+      hasMedia:
+        Boolean(rawBody?.media) ||
+        Boolean(rawBody?.data?.media) ||
+        rawBody?.data?.type === "media"
     });
 
     const firstName = normalizeNonEmptyString(rawBody?.firstName);
     const lastName = normalizeNonEmptyString(rawBody?.lastName);
     const birthday = normalizeNonEmptyString(rawBody?.birthday);
     const intakeText =
-      normalizeNonEmptyString(rawBody?.description) ||
       normalizeNonEmptyString(rawBody?.incident) ||
       normalizeNonEmptyString(rawBody?.notes) ||
       normalizeNonEmptyString(rawBody?.data?.text);
 
-    if (!firstName || !lastName || !birthday || !intakeText) {
+    if (!firstName || !lastName || !birthday) {
       return res.status(400).json({
         ok: false,
-        message:
-          "firstName, lastName, birthday, and incident description are required"
+        message: "firstName, lastName, and birthday are required"
       });
     }
 
@@ -126,12 +130,17 @@ patientsRouter.post("/", async (req, res) => {
       });
     }
 
+    console.log("[patients] create ai-classification:start");
     const { startedAt, expiresAt } = buildSessionWindow();
     const intakeClassification = await classifyPatientIntake({
       firstName,
       lastName,
       birthday,
-      incident: intakeText
+      incident: intakeText || "No incident details provided at intake."
+    });
+    console.log("[patients] create ai-classification:result", {
+      category: intakeClassification.category,
+      hasDescription: Boolean(intakeClassification.description)
     });
     const patient = await createPatientWithSession({
       category: intakeClassification.category,
@@ -142,9 +151,67 @@ patientsRouter.post("/", async (req, res) => {
       sessionStart: startedAt,
       sessionExpiresAt: expiresAt
     });
+    console.log("[patients] create db:patient-inserted", {
+      patientUuid: patient.uuid,
+      category: patient.category
+    });
+
+    const createTimestamp = Date.now();
+    const createTextValue =
+      normalizeNonEmptyString(rawBody?.notes) ||
+      normalizeNonEmptyString(rawBody?.data?.text) ||
+      normalizeNonEmptyString(rawBody?.incident);
+    const createFormValue =
+      rawBody && typeof rawBody === "object"
+        ? {
+            firstName,
+            lastName,
+            birthday
+          }
+        : null;
+
+    const createMediaItems = [
+      ...normalizeMediaItems(rawBody?.media),
+      ...normalizeMediaItems(rawBody?.data?.media),
+      ...(rawBody?.data?.type === "media" ? [rawBody.data] : [])
+    ].filter((item) => typeof item.contentBase64 === "string");
+
+    const createUploads = [];
+    for (const mediaItem of createMediaItems) {
+      const upload = await uploadPatientMedia({
+        patientUuid: patient.uuid,
+        contentBase64: mediaItem.contentBase64,
+        mimeType: mediaItem.mimeType,
+        timestamp: createTimestamp
+      });
+      createUploads.push(upload);
+    }
+    console.log("[patients] create media:uploaded", {
+      patientUuid: patient.uuid,
+      mediaCount: createUploads.length
+    });
+
+    const createdData = await insertPatientData({
+      patientUuid: patient.uuid,
+      payload: {
+        timestamp: createTimestamp,
+        form: createFormValue,
+        text: createTextValue ?? null,
+        media: createUploads
+      }
+    });
+    console.log("[patients] create db:patient-data-inserted", {
+      patientUuid: patient.uuid,
+      dataId: createdData.id
+    });
     enqueueRankingEvent(patient.uuid, "create");
+    console.log("[patients] create ranking:event-enqueued", {
+      patientUuid: patient.uuid,
+      reason: "create"
+    });
     console.log("[patients] create success", {
-      patientUuid: patient.uuid
+      patientUuid: patient.uuid,
+      category: patient.category
     });
 
     res.cookie(PATIENT_SESSION_COOKIE, patient.uuid, {
@@ -243,6 +310,10 @@ patientsRouter.patch("/:patientUuid", async (req, res) => {
       });
       uploads.push(upload);
     }
+    console.log("[patients] update media:uploaded", {
+      patientUuid,
+      mediaCount: uploads.length
+    });
 
     const payload = {
       timestamp,
@@ -256,6 +327,10 @@ patientsRouter.patch("/:patientUuid", async (req, res) => {
       payload
     });
     enqueueRankingEvent(patientUuid, "update");
+    console.log("[patients] update ranking:event-enqueued", {
+      patientUuid,
+      reason: "update"
+    });
     console.log("[patients] update success", {
       patientUuid,
       dataId: saved.id
