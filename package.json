@@ -11,6 +11,7 @@
     "dev:backend": "npm run dev --workspace backend",
     "dev:nurse": "npm run start --workspace nurse-ui",
     "dev:patient": "npm run dev --workspace patient-ui",
+    "dev:patient-network": "npm run dev --workspace patient-ui -- --host",
     "build:patient": "npm run build --workspace patient-ui"
   }
 }

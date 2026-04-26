@@ -1,4 +1,5 @@
 import { Router } from "express";
+import os from "os";
 import { env } from "../config/env.js";
 import {
   clearPatientRecords,
@@ -9,7 +10,7 @@ import {
   listTopPriorityPatients,
   updatePatientTriage
 } from "../db/patients.js";
-import { buildPatientQrPdf } from "../services/patientPdf.js";
+import { buildPatientQrDataUrl, buildPatientQrPdf } from "../services/patientPdf.js";
 import { enqueueRankingEvent } from "../services/rankingQueue.js";
 import { sendPatientAlert } from "../services/patientSockets.js";
 import { clearPatientMedia, createPatientMediaSignedUrl, uploadPatientMedia } from "../services/patientStorage.js";
@@ -20,6 +21,49 @@ import {
 } from "../services/pendingPatientUpdates.js";
 
 export const nursesRouter = Router();
+
+function getLanIpv4Address() {
+  const interfaces = os.networkInterfaces();
+  for (const values of Object.values(interfaces)) {
+    if (!Array.isArray(values)) {
+      continue;
+    }
+    for (const entry of values) {
+      if (!entry || entry.family !== "IPv4" || entry.internal) {
+        continue;
+      }
+      const ip = entry.address || "";
+      if (ip.startsWith("10.") || ip.startsWith("192.168.") || /^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)) {
+        return ip;
+      }
+    }
+  }
+  return "";
+}
+
+function resolvePatientUiUrl(req) {
+  const configured = new URL(env.patientUiBaseUrl);
+  const isLocalHost = configured.hostname === "localhost" || configured.hostname === "127.0.0.1";
+  if (!isLocalHost) {
+    return configured;
+  }
+
+  const requestHost = (req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim();
+  const requestProto = (req.headers["x-forwarded-proto"] || req.protocol || configured.protocol.replace(":", "")).toString();
+  if (!requestHost) {
+    const lanIp = getLanIpv4Address();
+    if (lanIp) {
+      configured.hostname = lanIp;
+    }
+    return configured;
+  }
+
+  const inferred = new URL(`${requestProto}://${requestHost}`);
+  configured.protocol = inferred.protocol;
+  const inferredIsLocalHost = inferred.hostname === "localhost" || inferred.hostname === "127.0.0.1";
+  configured.hostname = inferredIsLocalHost ? getLanIpv4Address() || inferred.hostname : inferred.hostname;
+  return configured;
+}
 
 nursesRouter.get("/queue", async (_req, res) => {
   try {
@@ -329,9 +373,31 @@ nursesRouter.post("/call", (req, res) => {
 });
 
 // Generate printable PDF with a general QR code to patient UI.
+nursesRouter.get("/qr-code", async (_req, res) => {
+  try {
+    const patientUrl = resolvePatientUiUrl(_req);
+    const qrDataUrl = await buildPatientQrDataUrl({
+      targetUrl: patientUrl.toString()
+    });
+
+    return res.json({
+      ok: true,
+      targetUrl: patientUrl.toString(),
+      qrDataUrl
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to generate patient QR code",
+      detail: error.message
+    });
+  }
+});
+
+// Generate printable PDF with a general QR code to patient UI.
 nursesRouter.get("/qr-pdf", async (_req, res) => {
   try {
-    const patientUrl = new URL(env.patientUiBaseUrl);
+    const patientUrl = resolvePatientUiUrl(_req);
 
     const pdfBuffer = await buildPatientQrPdf({
       targetUrl: patientUrl.toString()

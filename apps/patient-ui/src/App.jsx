@@ -95,15 +95,6 @@ async function requestJson(url, options = {}) {
   }
 }
 
-function buildLogEntry(message, detail = {}) {
-  return {
-    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    time: new Date().toLocaleTimeString(),
-    message,
-    detail
-  };
-}
-
 async function checkPatientSession() {
   return requestJson(`${patientsApiUrl}/session`);
 }
@@ -224,26 +215,14 @@ export default function App() {
   const [message, setMessage] = useState("");
   const [estimatedWaitTime, setEstimatedWaitTime] = useState(null);
   const [isListening, setIsListening] = useState(false);
-  const [debugLogs, setDebugLogs] = useState(() => [
-    buildLogEntry("Patient UI loaded", {
-      page: window.location.href,
-      backendUrl
-    })
-  ]);
 
   const isExistingPatient = mode === "update" && patientUuid;
-
-  function addDebugLog(logMessage, detail = {}) {
-    console.info(`${DEBUG_PREFIX} ${logMessage}`, detail);
-    setDebugLogs((current) => [buildLogEntry(logMessage, detail), ...current].slice(0, 8));
-  }
 
   useEffect(() => {
     let isMounted = true;
 
     checkPatientSession()
       .then((session) => {
-        addDebugLog("Session check finished", session);
         if (!isMounted || !session.hasSession) {
           return;
         }
@@ -254,10 +233,6 @@ export default function App() {
         setMessage("Existing patient session found. Updates will be added to your history.");
       })
       .catch((error) => {
-        addDebugLog("Session check failed", {
-          message: error.message,
-          backendUrl
-        });
         if (isMounted) {
           setMessage("");
         }
@@ -425,12 +400,6 @@ export default function App() {
     event.preventDefault();
     setStatus("submitting");
     setMessage("");
-    addDebugLog("Submit started", {
-      mode,
-      isExistingPatient: Boolean(isExistingPatient),
-      backendUrl,
-      mediaCount: mediaFiles.length
-    });
 
     try {
       let activePatientUuid = patientUuid;
@@ -447,30 +416,15 @@ export default function App() {
           media: createMedia
         };
 
-        addDebugLog("Creating patient row", {
-          firstName: form.firstName.trim(),
-          lastName: form.lastName.trim(),
-          birthday: form.birthday,
-          hasIncident: Boolean(createPayload.incident),
-          mediaCount: createMedia.length
-        });
         const created = await createPatientEntry(createPayload);
         activePatientUuid = created.patientUuid;
         setPatientUuid(activePatientUuid);
         setPatientWebsocketUrl(created.websocketUrl || "");
         setMode("update");
-        addDebugLog("Patient row created", {
-          patientUuid: activePatientUuid
-        });
       }
 
       if (isExistingPatient) {
         const updateMedia = await mediaFilesToPayload(mediaFiles);
-        addDebugLog("Appending patient update JSON", {
-          patientUuid: activePatientUuid,
-          payloadType: "patient_update",
-          mediaCount: updateMedia.length
-        });
         await appendPatientHistory(activePatientUuid, {
           ...buildUpdateSummary(form),
           text: form.updateNote,
@@ -479,9 +433,6 @@ export default function App() {
       }
 
       setStatus("submitted");
-      addDebugLog("Submit finished", {
-        patientUuid: activePatientUuid
-      });
       setMessage(
         isExistingPatient
           ? "Your update was added to your medical history."
@@ -491,11 +442,6 @@ export default function App() {
       updateField("updateNote", "");
     } catch (error) {
       setStatus("error");
-      addDebugLog("Submit failed", {
-        message: error.message,
-        backendUrl,
-        page: window.location.href
-      });
       setMessage(`Submission failed: ${error.message}. Backend: ${backendUrl}`);
     }
   }
@@ -714,18 +660,6 @@ export default function App() {
           </button>
         </form>
 
-        <details className="debug-panel">
-          <summary>Submission logs</summary>
-          <p>Backend: {backendUrl}</p>
-          <ol>
-            {debugLogs.map((log) => (
-              <li key={log.id}>
-                <strong>{log.time}</strong> {log.message}
-                <pre>{JSON.stringify(log.detail, null, 2)}</pre>
-              </li>
-            ))}
-          </ol>
-        </details>
       </section>
     </main>
   );

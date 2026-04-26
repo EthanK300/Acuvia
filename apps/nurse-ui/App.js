@@ -1,6 +1,6 @@
 import { StatusBar } from "expo-status-bar";
 import Constants from "expo-constants";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Image,
@@ -55,6 +55,7 @@ const backendUrl =
     : detectedBackendUrl;
 const DEBUG_PREFIX = "[nurse-ui]";
 const SEVERITY_FILTER_OPTIONS = ["All", "ESI 1", "ESI 2", "ESI 3", "ESI 4", "ESI 5"];
+const NURSE_POLL_INTERVAL_MS = 2000;
 
 function categoryToSeverity(category) {
   if (category === 1) return "ESI 1";
@@ -70,16 +71,10 @@ function getSeverityTone(category) {
 
 async function fetchQueue() {
   const url = `${backendUrl}/api/nurses/queue`;
-  console.info(`${DEBUG_PREFIX} queue request:start`, { url });
 
   try {
     const response = await fetch(url);
     const body = await response.json().catch(() => ({}));
-    console.info(`${DEBUG_PREFIX} queue request:finish`, {
-      status: response.status,
-      ok: response.ok,
-      patientCount: Array.isArray(body.patients) ? body.patients.length : 0
-    });
 
     if (!response.ok || body.ok === false) {
       throw new Error(body.message || `Queue request failed: ${response.status}`);
@@ -170,6 +165,17 @@ async function clearPatientFromQueue(patientUuid) {
     throw new Error(body.message || `Clear patient failed: ${response.status}`);
   }
   return body;
+}
+
+async function fetchNurseQrCode() {
+  const response = await fetch(`${backendUrl}/api/nurses/qr-code`);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || body.ok === false) {
+    throw new Error(body.message || `QR code request failed: ${response.status}`);
+  }
+  return {
+    qrDataUrl: typeof body.qrDataUrl === "string" ? body.qrDataUrl : ""
+  };
 }
 
 function formatElapsedSince(timestamp) {
@@ -323,7 +329,48 @@ function mapQueuePatient(row, index) {
   };
 }
 
-function mapPendingUpdate(update, patientsById) {
+function comparePatientPriority(left, right) {
+  const leftCategory = Number(left?.category) || 5;
+  const rightCategory = Number(right?.category) || 5;
+  if (leftCategory !== rightCategory) {
+    return leftCategory - rightCategory;
+  }
+  const leftRank = Number(left?.rank) || Number.MAX_SAFE_INTEGER;
+  const rightRank = Number(right?.rank) || Number.MAX_SAFE_INTEGER;
+  if (leftRank !== rightRank) {
+    return leftRank - rightRank;
+  }
+  const leftCreatedAt = Date.parse(left?.createdAt || "") || Number.MAX_SAFE_INTEGER;
+  const rightCreatedAt = Date.parse(right?.createdAt || "") || Number.MAX_SAFE_INTEGER;
+  return leftCreatedAt - rightCreatedAt;
+}
+
+function calculateOverallPosition(patients, patientUuid, category, rank) {
+  if (!Array.isArray(patients) || !patientUuid) {
+    return null;
+  }
+  const normalizedCategory = Number(category);
+  const normalizedRank = Number(rank);
+  if (!Number.isFinite(normalizedCategory) || !Number.isFinite(normalizedRank)) {
+    return null;
+  }
+
+  const projected = patients.map((patient) => {
+    if (patient.id !== patientUuid) {
+      return patient;
+    }
+    return {
+      ...patient,
+      category: normalizedCategory,
+      rank: normalizedRank
+    };
+  });
+  projected.sort(comparePatientPriority);
+  const index = projected.findIndex((patient) => patient.id === patientUuid);
+  return index >= 0 ? index + 1 : null;
+}
+
+function mapPendingUpdate(update, patientsById, queuePatients) {
   const patient = patientsById.get(update.patientUuid);
   const submittedText = stringFromValue(update.text) || "No text provided";
   const inferredDescription = patient?.description || submittedText;
@@ -331,6 +378,8 @@ function mapPendingUpdate(update, patientsById) {
   const currentRank = Number(update?.patientSnapshot?.currentRank) || patient?.rank || null;
   const proposedCategory = Number(update?.proposal?.proposedCategory) || currentCategory || 5;
   const proposedRank = Number(update?.proposal?.proposedRank) || null;
+  const currentOverallRank = calculateOverallPosition(queuePatients, update.patientUuid, currentCategory, currentRank);
+  const proposedOverallRank = calculateOverallPosition(queuePatients, update.patientUuid, proposedCategory, proposedRank);
   return {
     id: update.id,
     patientUuid: update.patientUuid,
@@ -343,7 +392,9 @@ function mapPendingUpdate(update, patientsById) {
     currentCategory,
     currentRank,
     proposedCategory,
-    proposedRank
+    proposedRank,
+    currentOverallRank,
+    proposedOverallRank
   };
 }
 
@@ -580,7 +631,7 @@ function QueueCard({ patient, selected, attendStatus, onAttend, onPress, onRemov
     >
       <View style={styles.cardTopLine}>
         <View style={styles.patientNameLine}>
-          <Text style={styles.rankText}>#{patient.rank}</Text>
+          <Text style={styles.rankText}>#{patient.displayRank ?? patient.rank}</Text>
           <Text style={styles.queueName}>{patient.name}</Text>
         </View>
         <SeverityBadge category={patient.category} compact />
@@ -632,27 +683,30 @@ function UpdateCard({ patient, pendingAction, onApprove, onReject }) {
   const actionInProgress = Boolean(pendingAction);
   const categoryChangeLabel =
     patient.currentCategory && patient.proposedCategory
-      ? `${categoryToSeverity(patient.currentCategory)} -> ${categoryToSeverity(patient.proposedCategory)}`
+      ? `${categoryToSeverity(patient.currentCategory)} → ${categoryToSeverity(patient.proposedCategory)}`
       : "No category proposal";
   const rankChangeLabel =
-    patient.currentRank && patient.proposedRank
-      ? `#${patient.currentRank} -> #${patient.proposedRank}`
-      : patient.proposedRank
-        ? `-> #${patient.proposedRank}`
-        : "No rank proposal";
+    patient.currentOverallRank && patient.proposedOverallRank
+      ? `#${patient.currentOverallRank} → #${patient.proposedOverallRank} (overall queue)`
+      : patient.proposedOverallRank
+        ? `→ #${patient.proposedOverallRank} (overall queue)`
+        : "No overall rank proposal";
   return (
     <View style={styles.updateCard}>
       <View style={styles.updateMain}>
         <Text style={styles.updateName}>{patient.name}</Text>
-        <View style={styles.injuryPill}>
-          <Text style={styles.injuryPillText}>{patient.injuryTag}</Text>
-        </View>
       </View>
       <Text style={styles.queueDescription} numberOfLines={2}>
         {patient.proposedDescription}
       </Text>
-      <Text style={styles.proposalText}>{categoryChangeLabel}</Text>
-      <Text style={styles.proposalText}>{rankChangeLabel}</Text>
+      <View style={styles.proposalLine}>
+        <Text style={styles.proposalLabel}>Category:</Text>
+        <Text style={styles.proposalText}>{categoryChangeLabel}</Text>
+      </View>
+      <View style={styles.proposalLine}>
+        <Text style={styles.proposalLabel}>Rank:</Text>
+        <Text style={styles.proposalText}>{rankChangeLabel}</Text>
+      </View>
       <View style={styles.updateFooter}>
         <Text style={styles.timeText}>{patient.updateTime}</Text>
         <View style={styles.updateActions}>
@@ -739,22 +793,31 @@ export default function App() {
   const [pendingUpdateActionByPayloadId, setPendingUpdateActionByPayloadId] = useState({});
   const [attendStatuses, setAttendStatuses] = useState({});
   const previousRanksRef = useRef(new Map());
+  const [isQrModalVisible, setIsQrModalVisible] = useState(false);
+  const [isQrOpening, setIsQrOpening] = useState(false);
+  const [qrCodeDataUrl, setQrCodeDataUrl] = useState("");
 
   const loadPatients = useCallback(async ({ showLoading = false } = {}) => {
     if (showLoading) {
       setIsRefreshing(true);
     }
     try {
-      const [queueRows, pendingRows] = await Promise.all([fetchPatients(), fetchPendingUpdates()]);
+      const [{ patients: queueRows, stats }, pendingRows] = await Promise.all([fetchQueue(), fetchPendingUpdates()]);
       const mappedPatients = queueRows.map(mapQueuePatient);
       const patientsById = new Map(mappedPatients.map((patient) => [patient.id, patient]));
-      const mappedPendingUpdates = pendingRows.map((update) => mapPendingUpdate(update, patientsById));
+      const mappedPendingUpdates = pendingRows.map((update) => mapPendingUpdate(update, patientsById, mappedPatients));
       setPatients(mappedPatients);
       setPendingUpdates(mappedPendingUpdates);
       setQueueStats({
-        totalPatients: mappedPatients.length,
-        criticalPatients: mappedPatients.filter((patient) => patient.category === 1).length,
-        averageWaitMinutes: calculateAverageWaitMinutes(mappedPatients)
+        totalPatients: Number.isFinite(Number(stats?.totalPatients))
+          ? Number(stats.totalPatients)
+          : mappedPatients.length,
+        criticalPatients: Number.isFinite(Number(stats?.criticalPatients))
+          ? Number(stats.criticalPatients)
+          : mappedPatients.filter((patient) => patient.category === 1).length,
+        averageWaitMinutes: Number.isFinite(Number(stats?.averageWaitMinutes))
+          ? Number(stats.averageWaitMinutes)
+          : calculateAverageWaitMinutes(mappedPatients)
       });
       setQueueError("");
       setSelectedPatientId((currentId) => {
@@ -777,7 +840,7 @@ export default function App() {
     loadPatients({ showLoading: true });
     const intervalId = setInterval(() => {
       loadPatients({ showLoading: false });
-    }, 5000);
+    }, NURSE_POLL_INTERVAL_MS);
     return () => clearInterval(intervalId);
   }, [loadPatients]);
 
@@ -975,6 +1038,19 @@ export default function App() {
     }
   }
 
+  async function handleOpenQrPdf() {
+    setIsQrOpening(true);
+    try {
+      const qr = await fetchNurseQrCode();
+      setQrCodeDataUrl(qr.qrDataUrl);
+      setIsQrModalVisible(true);
+    } catch (error) {
+      setQueueError(error.message || "Failed to open nurse QR code");
+    } finally {
+      setIsQrOpening(false);
+    }
+  }
+
   return (
     <SafeAreaView style={styles.screen}>
       <StatusBar style="dark" />
@@ -987,10 +1063,10 @@ export default function App() {
           </View>
           <Pressable
             accessibilityRole="button"
-            onPress={() => loadPatients({ showLoading: true })}
+            onPress={handleOpenQrPdf}
             style={styles.avatarButton}
           >
-            {isRefreshing ? <ActivityIndicator color="#ffffff" size="small" /> : <Text style={styles.avatarText}>RC</Text>}
+            {isQrOpening ? <ActivityIndicator color="#ffffff" size="small" /> : <Text style={styles.avatarText}>RC</Text>}
           </Pressable>
         </View>
 
@@ -1054,11 +1130,14 @@ export default function App() {
               </View>
             </View>
             <View style={styles.cardStack}>
-              {filteredPatients.map((patient) => (
+              {filteredPatients.map((patient, index) => (
                 <QueueCard
                   key={patient.id}
                   attendStatus={attendStatuses[patient.id]}
-                  patient={patient}
+                  patient={{
+                    ...patient,
+                    displayRank: index + 1
+                  }}
                   selected={patient.id === selectedPatientId}
                   onAttend={handleAttendPatient}
                   onRemove={handleRemovePatient}
@@ -1143,6 +1222,26 @@ export default function App() {
                 patient={selectedPatient}
               />
             </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        animationType="fade"
+        onRequestClose={() => setIsQrModalVisible(false)}
+        transparent
+        visible={isQrModalVisible}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={() => setIsQrModalVisible(false)}>
+          <Pressable style={styles.qrModalCard}>
+            <View style={styles.qrModalHeader}>
+              <Text style={styles.qrModalTitle}>Patient Check-In QR</Text>
+            </View>
+            {qrCodeDataUrl ? (
+              <Image source={{ uri: qrCodeDataUrl }} style={styles.qrCodeImage} />
+            ) : (
+              <Text style={styles.emptyQueueText}>QR code unavailable.</Text>
+            )}
           </Pressable>
         </Pressable>
       </Modal>
@@ -1801,10 +1900,24 @@ const styles = StyleSheet.create({
     marginTop: 8
   },
   proposalText: {
+    color: "#2d2d2d",
+    fontFamily,
+    fontSize: 14,
+    fontWeight: "600",
+    lineHeight: 18,
+    marginLeft: 8,
+    marginTop: 4
+  },
+  proposalLine: {
+    alignItems: "center",
+    flexDirection: "row",
+    marginTop: 4
+  },
+  proposalLabel: {
     color: "#5a5a5a",
     fontFamily,
     fontSize: 13,
-    lineHeight: 16,
+    fontWeight: "700",
     marginTop: 4
   },
   queueFooter: {
@@ -1963,6 +2076,39 @@ const styles = StyleSheet.create({
     padding: 16,
     width: "92%"
   },
+  qrModalCard: {
+    alignItems: "center",
+    backgroundColor: "#f8f8f8",
+    borderColor: "#e7e7e7",
+    borderRadius: 10,
+    borderWidth: 1,
+    maxWidth: 420,
+    padding: 16,
+    width: "90%"
+  },
+  qrCodeImage: {
+    backgroundColor: "#ffffff",
+    borderColor: "#d8e3ff",
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 280,
+    marginTop: 8,
+    width: 280
+  },
+  qrModalHeader: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "center",
+    marginBottom: 12,
+    width: "100%"
+  },
+  qrModalTitle: {
+    color: "#151515",
+    fontFamily,
+    fontSize: 22,
+    fontWeight: "800",
+    textAlign: "center"
+  },
   modalHeader: {
     alignItems: "center",
     flexDirection: "row",
@@ -1979,8 +2125,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     backgroundColor: "#0045d0",
     borderRadius: 8,
-    minHeight: 36,
     justifyContent: "center",
+    marginLeft: 12,
+    minHeight: 36,
     paddingHorizontal: 16
   },
   modalCloseText: {

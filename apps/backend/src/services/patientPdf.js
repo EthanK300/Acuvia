@@ -1,6 +1,14 @@
 import PDFDocument from "pdfkit";
 import QRCode from "qrcode";
 
+export async function buildPatientQrDataUrl({ targetUrl }) {
+  return QRCode.toDataURL(targetUrl, {
+    errorCorrectionLevel: "M",
+    margin: 1,
+    width: 512
+  });
+}
+
 export async function buildPatientQrPdf({ targetUrl }) {
   const qrBuffer = await QRCode.toBuffer(targetUrl, {
     errorCorrectionLevel: "M",
