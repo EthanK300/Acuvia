@@ -11,7 +11,7 @@ import {
   readCookieValue
 } from "../services/session.js";
 import { classifyPatientIntake } from "../services/aiTriage.js";
-import { enqueueRankingEvent } from "../services/rankingQueue.js";
+import { calculateInitialRankForCase } from "../services/rankingQueue.js";
 import { uploadPatientMedia } from "../services/patientStorage.js";
 
 export const patientsRouter = Router();
@@ -100,6 +100,7 @@ patientsRouter.post("/", async (req, res) => {
       hasFirstName: Boolean(rawBody?.firstName),
       hasLastName: Boolean(rawBody?.lastName),
       hasBirthday: Boolean(rawBody?.birthday),
+      hasDescription: Boolean(rawBody?.description),
       hasNotes: Boolean(rawBody?.notes),
       hasIncident: Boolean(rawBody?.incident),
       hasMedia:
@@ -112,6 +113,7 @@ patientsRouter.post("/", async (req, res) => {
     const lastName = normalizeNonEmptyString(rawBody?.lastName);
     const birthday = normalizeNonEmptyString(rawBody?.birthday);
     const intakeText =
+      normalizeNonEmptyString(rawBody?.description) ||
       normalizeNonEmptyString(rawBody?.incident) ||
       normalizeNonEmptyString(rawBody?.notes) ||
       normalizeNonEmptyString(rawBody?.data?.text);
@@ -142,8 +144,25 @@ patientsRouter.post("/", async (req, res) => {
       category: intakeClassification.category,
       hasDescription: Boolean(intakeClassification.description)
     });
+    console.log("[patients] create ai-ranking:start");
+    const initialRank = await calculateInitialRankForCase({
+      category: intakeClassification.category,
+      description: intakeClassification.description,
+      created_at: startedAt,
+      latest_payload: {
+        text: intakeText,
+        form: rawBody?.data || null
+      }
+    }, {
+      requireAiComparison: true
+    });
+    console.log("[patients] create ai-ranking:result", {
+      category: intakeClassification.category,
+      numberRank: initialRank
+    });
     const patient = await createPatientWithSession({
       category: intakeClassification.category,
+      numberRank: initialRank,
       firstName,
       lastName,
       birthday,
@@ -153,7 +172,8 @@ patientsRouter.post("/", async (req, res) => {
     });
     console.log("[patients] create db:patient-inserted", {
       patientUuid: patient.uuid,
-      category: patient.category
+      category: patient.category,
+      numberRank: patient.number_rank
     });
 
     const createTimestamp = Date.now();
@@ -204,14 +224,10 @@ patientsRouter.post("/", async (req, res) => {
       patientUuid: patient.uuid,
       dataId: createdData.id
     });
-    enqueueRankingEvent(patient.uuid, "create");
-    console.log("[patients] create ranking:event-enqueued", {
-      patientUuid: patient.uuid,
-      reason: "create"
-    });
     console.log("[patients] create success", {
       patientUuid: patient.uuid,
-      category: patient.category
+      category: patient.category,
+      numberRank: patient.number_rank
     });
 
     res.cookie(PATIENT_SESSION_COOKIE, patient.uuid, {

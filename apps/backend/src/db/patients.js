@@ -36,6 +36,7 @@ export async function getPatientForRanking(patientUuid) {
 
 export async function createPatientWithSession({
   category,
+  numberRank,
   firstName,
   lastName,
   birthday,
@@ -43,14 +44,41 @@ export async function createPatientWithSession({
   sessionStart,
   sessionExpiresAt
 }) {
-  const result = await pool.query(
-    `insert into patients (category, first_name, last_name, birthday, description, session_start, session_expires_at)
-     values ($1, $2, $3, $4, $5, $6, $7)
-     returning uuid, category, first_name, last_name, birthday, description, session_start, session_expires_at`,
-    [category, firstName, lastName, birthday, description ?? null, sessionStart, sessionExpiresAt]
-  );
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query(
+      `update patients
+       set number_rank = number_rank + 1
+       where category = $1
+         and number_rank >= $2`,
+      [category, numberRank]
+    );
 
-  return result.rows[0];
+    const result = await client.query(
+      `insert into patients (
+         category,
+         number_rank,
+         first_name,
+         last_name,
+         birthday,
+         description,
+         session_start,
+         session_expires_at
+       )
+       values ($1, $2, $3, $4, $5, $6, $7, $8)
+       returning uuid, category, number_rank, first_name, last_name, birthday, description, session_start, session_expires_at`,
+      [category, numberRank, firstName, lastName, birthday, description ?? null, sessionStart, sessionExpiresAt]
+    );
+
+    await client.query("commit");
+    return result.rows[0];
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function insertPatientData({ patientUuid, payload }) {

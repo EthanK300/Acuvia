@@ -50,7 +50,7 @@ function compareCases(a, b) {
   return aCreated - bCreated;
 }
 
-async function compareCasesWithAI(targetCase, referenceCase) {
+async function compareCasesWithAI(targetCase, referenceCase, { allowFallback = true } = {}) {
   try {
     const aiResult = await compareCasesForRanking(targetCase, referenceCase);
     if (aiResult.verdict === "more_severe") {
@@ -60,6 +60,9 @@ async function compareCasesWithAI(targetCase, referenceCase) {
       return 1;
     }
   } catch (error) {
+    if (!allowFallback) {
+      throw error;
+    }
     console.warn("[ranking-queue] AI comparison failed, using heuristic fallback:", error.message);
   }
 
@@ -73,13 +76,13 @@ async function compareCasesWithAI(targetCase, referenceCase) {
   return 0;
 }
 
-async function findInsertionIndexBinary(sortedCases, targetCase) {
+async function findInsertionIndexBinary(sortedCases, targetCase, options = {}) {
   let low = 0;
   let high = sortedCases.length;
 
   while (low < high) {
     const mid = Math.floor((low + high) / 2);
-    const comparison = await compareCasesWithAI(targetCase, sortedCases[mid]);
+    const comparison = await compareCasesWithAI(targetCase, sortedCases[mid], options);
     if (comparison > 0) {
       low = mid + 1;
     } else {
@@ -88,6 +91,31 @@ async function findInsertionIndexBinary(sortedCases, targetCase) {
   }
 
   return low;
+}
+
+export async function calculateInitialRankForCase(targetCase, { requireAiComparison = true } = {}) {
+  const category = Number(targetCase?.category);
+  if (!Number.isInteger(category) || category < 1 || category > 5) {
+    return 1;
+  }
+
+  const categoryPatients = await listCategoryPatientsForRanking(category);
+  categoryPatients.sort(compareCases);
+  console.log("[ranking-queue] initial rank candidates", {
+    category,
+    sameCategoryCount: categoryPatients.length,
+    requireAiComparison
+  });
+
+  const insertionIndex = await findInsertionIndexBinary(categoryPatients, {
+    ...targetCase,
+    created_at: targetCase.created_at || new Date().toISOString(),
+    latest_payload: targetCase.latest_payload || null
+  }, {
+    allowFallback: !requireAiComparison
+  });
+
+  return insertionIndex + 1;
 }
 
 async function assignRankForPatient(patientUuid) {
