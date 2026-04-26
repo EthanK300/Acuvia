@@ -1,11 +1,27 @@
 import { Router } from "express";
 import { env } from "../config/env.js";
-import { clearPatientRecords } from "../db/patients.js";
+import { clearPatientRecords, listTopPriorityPatients } from "../db/patients.js";
 import { buildPatientQrPdf } from "../services/patientPdf.js";
 import { sendPatientAlert } from "../services/patientSockets.js";
 import { clearPatientMedia } from "../services/patientStorage.js";
 
 export const nursesRouter = Router();
+
+nursesRouter.get("/queue", async (_req, res) => {
+  try {
+    const patients = await listTopPriorityPatients(50);
+    return res.json({
+      ok: true,
+      patients
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to load nurse queue",
+      detail: error.message
+    });
+  }
+});
 
 // Move action from nurse control surface.
 nursesRouter.post("/move", (_req, res) => {

@@ -1,4 +1,5 @@
 import { StatusBar } from "expo-status-bar";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Pressable,
   SafeAreaView,
@@ -10,72 +11,64 @@ import {
 
 const backendUrl = process.env.EXPO_PUBLIC_BACKEND_URL || "http://localhost:4000";
 
-const severityRank = {
-  critical: 4,
-  high: 3,
-  moderate: 2,
-  low: 1
-};
+function categoryToSeverity(category) {
+  if (category === 1) return "critical";
+  if (category === 2) return "urgent";
+  return "non urgent";
+}
 
-const mockPatients = [
-  {
-    id: "acu-1042",
-    name: "Jordan Lee",
-    age: 42,
-    injury: "Chest trauma with shortness of breath",
-    severity: "critical",
-    vitals: "BP 88/54, HR 132",
-    location: "Bay 2",
-    waitTime: "4 min"
-  },
-  {
-    id: "acu-1039",
-    name: "Mina Patel",
-    age: 67,
-    injury: "Head injury after fall",
-    severity: "high",
-    vitals: "BP 146/92, HR 104",
-    location: "Triage",
-    waitTime: "11 min"
-  },
-  {
-    id: "acu-1044",
-    name: "Sam Rivera",
-    age: 29,
-    injury: "Deep arm laceration",
-    severity: "moderate",
-    vitals: "BP 121/78, HR 86",
-    location: "Waiting",
-    waitTime: "18 min"
-  },
-  {
-    id: "acu-1040",
-    name: "Evelyn Brooks",
-    age: 35,
-    injury: "Ankle sprain with swelling",
-    severity: "low",
-    vitals: "BP 118/74, HR 72",
-    location: "Waiting",
-    waitTime: "22 min"
+async function fetchPatients() {
+  const response = await fetch(`${backendUrl}/api/nurses/queue`);
+  if (!response.ok) {
+    throw new Error(`Queue request failed: ${response.status}`);
   }
-];
 
-function fetchPatients() {
-  return mockPatients;
+  const body = await response.json();
+  return Array.isArray(body.patients) ? body.patients : [];
 }
 
-function calculateInjuryPriority(patient) {
-  return severityRank[patient.severity] || 0;
+function calculateAgeFromBirthday(birthday) {
+  if (!birthday) {
+    return "--";
+  }
+  const birthDate = new Date(birthday);
+  if (Number.isNaN(birthDate.getTime())) {
+    return "--";
+  }
+  const now = new Date();
+  let age = now.getFullYear() - birthDate.getFullYear();
+  const monthDiff = now.getMonth() - birthDate.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && now.getDate() < birthDate.getDate())) {
+    age -= 1;
+  }
+  return age;
 }
 
-function sortPatientsByPriority(patients) {
-  return [...patients].sort((current, next) => {
-    return calculateInjuryPriority(next) - calculateInjuryPriority(current);
-  });
+function formatElapsedSince(timestamp) {
+  if (!timestamp) {
+    return "--";
+  }
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return "--";
+  }
+  const minutes = Math.max(0, Math.floor((Date.now() - date.getTime()) / 60000));
+  return `${minutes} min`;
 }
 
-function handleRefreshPatients() {
-  // Future implementation: fetch current triage queue from backendUrl.
+function mapQueuePatient(row) {
+  const severity = categoryToSeverity(row.category);
+  return {
+    id: row.uuid,
+    numberRank: row.number_rank,
+    name: `${row.first_name ?? ""} ${row.last_name ?? ""}`.trim() || "Unknown",
+    age: calculateAgeFromBirthday(row.birthday),
+    injury: row.description || "No description",
+    severity,
+    vitals: row.latest_payload?.text || "No recent text update",
+    location: `Rank ${row.number_rank ?? "--"}`,
+    waitTime: formatElapsedSince(row.created_at)
+  };
 }
 
 function handlePatientSelect(patientId) {
@@ -88,11 +81,45 @@ function requestDownloadableAppBuild() {
 }
 
 function getSeverityStyle(severity) {
+  if (severity === "urgent") {
+    return severityStyles.high;
+  }
+  if (severity === "non urgent") {
+    return severityStyles.low;
+  }
   return severityStyles[severity] || severityStyles.low;
 }
 
 export default function App() {
-  const prioritizedPatients = sortPatientsByPriority(fetchPatients());
+  const [patients, setPatients] = useState([]);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [queueError, setQueueError] = useState("");
+
+  const loadPatients = useCallback(async () => {
+    setIsRefreshing(true);
+    try {
+      const queueRows = await fetchPatients();
+      setPatients(queueRows.map(mapQueuePatient));
+      setQueueError("");
+    } catch (error) {
+      setQueueError(error.message || "Failed to load queue");
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadPatients();
+    const intervalId = setInterval(loadPatients, 5000);
+    return () => clearInterval(intervalId);
+  }, [loadPatients]);
+
+  function handleRefreshPatients() {
+    loadPatients();
+  }
+
+  const prioritizedPatients = useMemo(() => patients, [patients]);
+
   const criticalCount = prioritizedPatients.filter((patient) => {
     return patient.severity === "critical";
   }).length;
@@ -124,10 +151,16 @@ export default function App() {
           <Text style={styles.summaryLabel}>Critical</Text>
         </View>
         <View style={styles.summaryPanel}>
-          <Text style={styles.summaryValue}>Live</Text>
+          <Text style={styles.summaryValue}>{isRefreshing ? "..." : "Live"}</Text>
           <Text style={styles.summaryLabel}>Queue</Text>
         </View>
       </View>
+
+      {queueError ? (
+        <View style={styles.errorPanel}>
+          <Text style={styles.errorText}>{queueError}</Text>
+        </View>
+      ) : null}
 
       <ScrollView contentContainerStyle={styles.listContent}>
         {prioritizedPatients.map((patient, index) => {
@@ -272,6 +305,21 @@ const styles = StyleSheet.create({
     gap: 10,
     paddingHorizontal: 20,
     paddingVertical: 10
+  },
+  errorPanel: {
+    backgroundColor: "#ffe1df",
+    borderColor: "#f3b2ad",
+    borderRadius: 8,
+    borderWidth: 1,
+    marginHorizontal: 20,
+    marginTop: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 10
+  },
+  errorText: {
+    color: "#9d241b",
+    fontSize: 13,
+    fontWeight: "700"
   },
   summaryPanel: {
     backgroundColor: "#ffffff",

@@ -69,3 +69,34 @@ export async function clearPatientRecords(patientUuid) {
     client.release();
   }
 }
+
+export async function listTopPriorityPatients(limit = 50) {
+  const result = await pool.query(
+    `select
+       p.uuid,
+       p.number_rank,
+       p.category,
+       p.first_name,
+       p.last_name,
+       p.birthday,
+       p.description,
+       p.session_start,
+       p.session_expires_at,
+       p.created_at,
+       latest_data.payload as latest_payload,
+       latest_data.updated_at as latest_payload_updated_at
+     from patients p
+     left join lateral (
+       select pd.payload, pd.updated_at
+       from patient_data pd
+       where pd.patient_uuid = p.uuid
+       order by pd.updated_at desc
+       limit 1
+     ) latest_data on true
+     order by p.category asc, p.number_rank asc nulls last, p.created_at asc
+     limit $1`,
+    [limit]
+  );
+
+  return result.rows;
+}
