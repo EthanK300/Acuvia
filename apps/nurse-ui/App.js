@@ -2,11 +2,14 @@ import { StatusBar } from "expo-status-bar";
 import Constants from "expo-constants";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  ActivityIndicator,
+  Modal,
   Pressable,
   SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View
 } from "react-native";
 
@@ -50,13 +53,18 @@ const backendUrl =
     ? configuredBackendUrl
     : detectedBackendUrl;
 const DEBUG_PREFIX = "[nurse-ui]";
+const SEVERITY_FILTER_OPTIONS = ["All", "ESI 1", "ESI 2", "ESI 3", "ESI 4", "ESI 5"];
 
 function categoryToSeverity(category) {
-  if (category === 1) return "esi 1";
-  if (category === 2) return "esi 2";
-  if (category === 3) return "esi 3";
-  if (category === 4) return "esi 4";
-  return "esi 5";
+  if (category === 1) return "ESI 1";
+  if (category === 2) return "ESI 2";
+  if (category === 3) return "ESI 3";
+  if (category === 4) return "ESI 4";
+  return "ESI 5";
+}
+
+function getSeverityTone(category) {
+  return severityTones[category] || severityTones[5];
 }
 
 async function fetchPatients() {
@@ -86,23 +94,6 @@ async function fetchPatients() {
   }
 }
 
-function calculateAgeFromBirthday(birthday) {
-  if (!birthday) {
-    return "--";
-  }
-  const birthDate = new Date(birthday);
-  if (Number.isNaN(birthDate.getTime())) {
-    return "--";
-  }
-  const now = new Date();
-  let age = now.getFullYear() - birthDate.getFullYear();
-  const monthDiff = now.getMonth() - birthDate.getMonth();
-  if (monthDiff < 0 || (monthDiff === 0 && now.getDate() < birthDate.getDate())) {
-    age -= 1;
-  }
-  return age;
-}
-
 function formatElapsedSince(timestamp) {
   if (!timestamp) {
     return "--";
@@ -112,446 +103,1324 @@ function formatElapsedSince(timestamp) {
     return "--";
   }
   const minutes = Math.max(0, Math.floor((Date.now() - date.getTime()) / 60000));
-  return `${minutes} min`;
+  if (minutes < 60) {
+    return `${minutes} mins ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder ? `${hours}h ${remainder}m ago` : `${hours}h ago`;
 }
 
-function mapQueuePatient(row) {
-  const severity = categoryToSeverity(row.category);
+function calculateWaitMinutes(timestamp) {
+  if (!timestamp) {
+    return null;
+  }
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  return Math.max(0, Math.floor((Date.now() - date.getTime()) / 60000));
+}
+
+function formatAverageWait(minutes) {
+  if (minutes == null) {
+    return "--";
+  }
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
+}
+
+function formatBirthday(value) {
+  if (!value) {
+    return "--";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleDateString(undefined, {
+    month: "long",
+    day: "numeric",
+    year: "numeric"
+  });
+}
+
+function stringFromValue(value) {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+  return "";
+}
+
+function getFormValue(form, keys) {
+  if (!form || typeof form !== "object") {
+    return "";
+  }
+  for (const key of keys) {
+    const value = stringFromValue(form[key]);
+    if (value) {
+      return value;
+    }
+  }
+  return "";
+}
+
+function getLatestPayload(row) {
+  return row.latest_payload && typeof row.latest_payload === "object" ? row.latest_payload : {};
+}
+
+function mapQueuePatient(row, index) {
+  const latestPayload = getLatestPayload(row);
+  const form = latestPayload.form && typeof latestPayload.form === "object" ? latestPayload.form : {};
+  const text = stringFromValue(latestPayload.text);
+  const description = stringFromValue(row.description) || text || "No description provided";
+  const category = Number(row.category) || 5;
+  const name = `${row.first_name ?? ""} ${row.last_name ?? ""}`.trim() || "Unknown Patient";
+
   return {
     id: row.uuid,
-    numberRank: row.number_rank,
-    name: `${row.first_name ?? ""} ${row.last_name ?? ""}`.trim() || "Unknown",
-    age: calculateAgeFromBirthday(row.birthday),
-    injury: row.description || "No description",
-    severity,
-    vitals: row.latest_payload?.text || "No recent text update",
-    location: `Rank ${row.number_rank ?? "--"}`,
-    waitTime: formatElapsedSince(row.created_at)
+    category,
+    rank: Number(row.number_rank) || index + 1,
+    name,
+    birthday: formatBirthday(row.birthday),
+    description,
+    submittedText: text || description,
+    createdAt: row.created_at,
+    updatedAt: row.latest_payload_updated_at,
+    waitTime: formatElapsedSince(row.created_at),
+    updateTime: formatElapsedSince(row.latest_payload_updated_at || row.created_at),
+    areaOfPain: getFormValue(form, ["areaOfPain", "area", "painArea"]) || inferInjuryTag(description),
+    painLevel: getFormValue(form, ["painLevel", "overallPain", "rateOverallPain"]) || "Not specified",
+    breathing: getFormValue(form, ["breathing", "redFlags", "troubleBreathing"]) || "Not specified",
+    medications: getFormValue(form, ["medications", "medication"]) || "N/A",
+    allergies: getFormValue(form, ["allergies", "allergy"]) || "N/A",
+    duration: getFormValue(form, ["duration", "durationOfPain"]) || "Not specified",
+    hadBefore: getFormValue(form, ["hadBefore", "previouslyHadThis"]) || "Not specified",
+    injuryTag: inferInjuryTag(description),
+    hasUpdate: Boolean(row.latest_payload_updated_at)
   };
 }
 
-async function fetchPatientSummary(patientUuid) {
-  const response = await fetch(`${backendUrl}/api/nurses/patient/${patientUuid}/summary`);
-  if (!response.ok) {
-    throw new Error(`Summary request failed: ${response.status}`);
+function inferInjuryTag(description) {
+  const text = String(description || "").toLowerCase();
+  if (text.includes("chest") || text.includes("breath") || text.includes("respiratory")) return "Respiratory";
+  if (text.includes("allerg") || text.includes("anaphyl")) return "Anaphylaxis";
+  if (text.includes("rash") || text.includes("skin")) return "Dermatological";
+  if (text.includes("wrist") || text.includes("ankle") || text.includes("fracture") || text.includes("sprain")) return "Orthopedic";
+  if (text.includes("abdomen") || text.includes("stomach")) return "Abdominal";
+  return "General";
+}
+
+function LogoMark() {
+  return (
+    <View style={styles.logoMark} accessibilityLabel="Acuvia logo">
+      <View style={styles.logoPersonLeft}>
+        <View style={styles.logoHeadLeft} />
+        <View style={styles.logoBodyLeft} />
+      </View>
+      <View style={styles.logoHeart}>
+        <View style={styles.logoHeartDotLeft} />
+        <View style={styles.logoHeartDotRight} />
+        <View style={styles.logoHeartBase} />
+      </View>
+      <View style={styles.logoPersonRight}>
+        <View style={styles.logoHeadRight} />
+        <View style={styles.logoBodyRight} />
+      </View>
+    </View>
+  );
+}
+
+function SeverityBadge({ category, compact = false }) {
+  const tone = getSeverityTone(category);
+  return (
+    <View style={[styles.severityBadge, compact && styles.severityBadgeCompact, { backgroundColor: tone.bg }]}>
+      <Text style={[styles.severityText, compact && styles.severityTextCompact, { color: tone.fg }]}>
+        {categoryToSeverity(category)}
+      </Text>
+    </View>
+  );
+}
+
+function MagnifierIcon() {
+  return (
+    <View style={styles.magnifierIcon}>
+      <View style={styles.magnifierCircle} />
+      <View style={styles.magnifierHandle} />
+    </View>
+  );
+}
+
+function FilterPill({ label, active, onPress }) {
+  return (
+    <Pressable accessibilityRole="button" onPress={onPress} style={[styles.filterPill, active && styles.filterPillActive]}>
+      <Text style={styles.filterText}>{label}</Text>
+      <View style={styles.filterChevronIcon} />
+    </Pressable>
+  );
+}
+
+function SearchButton({ active, onPress }) {
+  return (
+    <Pressable
+      accessibilityLabel="Search patients"
+      accessibilityRole="button"
+      onPress={onPress}
+      style={[styles.searchButton, active && styles.searchButtonActive]}
+    >
+      <MagnifierIcon />
+    </Pressable>
+  );
+}
+
+function PatientDetail({ patient }) {
+  if (!patient) {
+    return (
+      <View style={[styles.detailPanel, styles.emptyDetailPanel]}>
+        <Text style={styles.emptyTitle}>No patients in queue</Text>
+        <Text style={styles.emptyText}>New patient submissions will appear here automatically.</Text>
+      </View>
+    );
   }
 
-  const body = await response.json();
-  return body.summary?.summary || "only media";
+  const detailItems = [
+    ["Area of Pain", patient.areaOfPain],
+    ["Rate Overall Pain", patient.painLevel],
+    ["Duration of Pain", patient.duration],
+    ["Are you on any medication? If not, N/A", patient.medications],
+    ["Do you have any allergies? If not, N/A", patient.allergies],
+    ["Have you had this before?", patient.hadBefore],
+    ["Any trouble breathing, chest pain, or feel like you might pass out?", patient.breathing]
+  ];
+
+  return (
+    <View style={styles.detailPanel}>
+      <View style={styles.detailHeader}>
+        <View style={styles.detailIdentity}>
+          <Text style={styles.detailName}>{patient.name}</Text>
+          <View>
+            <Text style={styles.detailMetaLabel}>Date of Birth</Text>
+            <Text style={styles.detailMetaValue}>{patient.birthday}</Text>
+          </View>
+        </View>
+        <SeverityBadge category={patient.category} />
+      </View>
+
+      <View style={styles.intakeGrid}>
+        {detailItems.map(([label, value]) => (
+          <View key={label} style={styles.intakeItem}>
+            <Text style={styles.intakeLabel}>{label}</Text>
+            <Text style={styles.intakeValue}>{value}</Text>
+          </View>
+        ))}
+        <View style={[styles.intakeItem, styles.reasonItem]}>
+          <Text style={styles.intakeLabel}>What is the main reason you're here today?</Text>
+          <Text style={styles.intakeValue}>{patient.submittedText}</Text>
+        </View>
+      </View>
+    </View>
+  );
 }
 
-function requestDownloadableAppBuild() {
-  // Future implementation: trigger Expo/EAS build or surface install link.
+function QueueCard({ patient, selected, onPress }) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={() => onPress(patient)}
+      style={[styles.queueCard, selected && styles.queueCardSelected]}
+    >
+      <View style={styles.cardTopLine}>
+        <View style={styles.patientNameLine}>
+          <Text style={styles.rankText}>#{patient.rank}</Text>
+          <Text style={styles.queueName}>{patient.name}</Text>
+          {patient.category <= 2 ? <View style={styles.alertDot} /> : null}
+          <View style={styles.injuryPill}>
+            <Text style={styles.injuryPillText}>{patient.injuryTag}</Text>
+          </View>
+        </View>
+        <SeverityBadge category={patient.category} compact />
+      </View>
+      <Text style={styles.queueDescription} numberOfLines={2}>
+        {patient.description}
+      </Text>
+      <View style={styles.queueFooter}>
+        <Text style={styles.timeText}>{patient.waitTime}</Text>
+        <View style={styles.attendButton}>
+          <Text style={styles.attendButtonText}>Attend Patient</Text>
+        </View>
+      </View>
+    </Pressable>
+  );
 }
 
-function getSeverityStyle(severity) {
-  return severityStyles[severity] || severityStyles.low;
+function UpdateCard({ patient }) {
+  return (
+    <View style={styles.updateCard}>
+      <View style={styles.updateMain}>
+        <Text style={styles.updateName}>{patient.name}</Text>
+        <View style={styles.injuryPill}>
+          <Text style={styles.injuryPillText}>{patient.injuryTag}</Text>
+        </View>
+      </View>
+      <Text style={styles.queueDescription} numberOfLines={2}>
+        {patient.submittedText}
+      </Text>
+      <View style={styles.updateFooter}>
+        <Text style={styles.timeText}>{patient.updateTime}</Text>
+        <View style={styles.updateActions}>
+          <Pressable accessibilityRole="button" style={[styles.updateActionButton, styles.acceptButton]}>
+            <Text style={styles.acceptText}>OK</Text>
+          </Pressable>
+          <Pressable accessibilityRole="button" style={[styles.updateActionButton, styles.dismissButton]}>
+            <Text style={styles.dismissText}>X</Text>
+          </Pressable>
+          <SeverityBadge category={patient.category} compact />
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function FilterDropdown({ title, options, selectedValue, visible, onClose, onSelect }) {
+  return (
+    <Modal animationType="fade" onRequestClose={onClose} transparent visible={visible}>
+      <Pressable style={styles.dropdownBackdrop} onPress={onClose}>
+        <Pressable style={styles.dropdownCard}>
+          <View style={styles.dropdownHeader}>
+            <Text style={styles.dropdownTitle}>{title}</Text>
+            <Pressable accessibilityRole="button" onPress={onClose} style={styles.dropdownCloseButton}>
+              <Text style={styles.dropdownCloseText}>Close</Text>
+            </Pressable>
+          </View>
+          <ScrollView contentContainerStyle={styles.dropdownOptions}>
+            {options.map((option) => {
+              const isSelected = option === selectedValue;
+              return (
+                <Pressable
+                  accessibilityRole="button"
+                  key={option}
+                  onPress={() => {
+                    onSelect(option);
+                    onClose();
+                  }}
+                  style={[styles.dropdownOption, isSelected && styles.dropdownOptionSelected]}
+                >
+                  <Text style={[styles.dropdownOptionText, isSelected && styles.dropdownOptionTextSelected]}>
+                    {option === "All" ? `All ${title.toLowerCase()}` : option}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
 }
 
 export default function App() {
   const [patients, setPatients] = useState([]);
+  const [selectedPatientId, setSelectedPatientId] = useState("");
+  const [isPatientModalVisible, setIsPatientModalVisible] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [queueError, setQueueError] = useState("");
-  const [selectedPatientSummary, setSelectedPatientSummary] = useState("");
-  const [selectedPatientLabel, setSelectedPatientLabel] = useState("");
+  const [isSearchVisible, setIsSearchVisible] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [severityFilter, setSeverityFilter] = useState("All");
+  const [injuryFilter, setInjuryFilter] = useState("All");
+  const [activeDropdown, setActiveDropdown] = useState(null);
 
-  const loadPatients = useCallback(async () => {
-    setIsRefreshing(true);
+  const loadPatients = useCallback(async ({ showLoading = false } = {}) => {
+    if (showLoading) {
+      setIsRefreshing(true);
+    }
     try {
       const queueRows = await fetchPatients();
-      setPatients(queueRows.map(mapQueuePatient));
+      const mappedPatients = queueRows.map(mapQueuePatient);
+      setPatients(mappedPatients);
       setQueueError("");
+      setSelectedPatientId((currentId) => {
+        if (currentId && mappedPatients.some((patient) => patient.id === currentId)) {
+          return currentId;
+        }
+        setIsPatientModalVisible(false);
+        return "";
+      });
     } catch (error) {
       setQueueError(error.message || "Failed to load queue");
     } finally {
-      setIsRefreshing(false);
+      if (showLoading) {
+        setIsRefreshing(false);
+      }
     }
   }, []);
 
   useEffect(() => {
-    loadPatients();
-    const intervalId = setInterval(loadPatients, 5000);
+    loadPatients({ showLoading: true });
+    const intervalId = setInterval(() => {
+      loadPatients({ showLoading: false });
+    }, 5000);
     return () => clearInterval(intervalId);
   }, [loadPatients]);
 
-  function handleRefreshPatients() {
-    loadPatients();
-  }
+  const selectedPatient = useMemo(() => {
+    return patients.find((patient) => patient.id === selectedPatientId) || null;
+  }, [patients, selectedPatientId]);
 
-  const handlePatientSelect = useCallback(async (patient) => {
-    try {
-      const summary = await fetchPatientSummary(patient.id);
-      setSelectedPatientLabel(patient.name);
-      setSelectedPatientSummary(summary);
-    } catch (error) {
-      setSelectedPatientLabel(patient.name);
-      setSelectedPatientSummary(error.message || "Failed to load patient summary");
+  const criticalCount = patients.filter((patient) => patient.category === 1).length;
+  const averageWaitMinutes = useMemo(() => {
+    const waits = patients
+      .map((patient) => calculateWaitMinutes(patient.createdAt))
+      .filter((minutes) => Number.isFinite(minutes));
+    if (waits.length === 0) {
+      return null;
     }
-  }, []);
+    return Math.round(waits.reduce((total, minutes) => total + minutes, 0) / waits.length);
+  }, [patients]);
+  const injuryFilterOptions = useMemo(() => {
+    return ["All", ...Array.from(new Set(patients.map((patient) => patient.injuryTag))).sort()];
+  }, [patients]);
 
-  const prioritizedPatients = useMemo(() => patients, [patients]);
+  useEffect(() => {
+    if (!injuryFilterOptions.includes(injuryFilter)) {
+      setInjuryFilter("All");
+    }
+  }, [injuryFilter, injuryFilterOptions]);
 
-  const criticalCount = prioritizedPatients.filter((patient) => {
-    return patient.severity === "esi 1";
-  }).length;
+  const filteredPatients = useMemo(() => {
+    const normalizedQuery = searchQuery.trim().toLowerCase();
+    return patients.filter((patient) => {
+      const matchesSearch =
+        !normalizedQuery ||
+        patient.name.toLowerCase().includes(normalizedQuery) ||
+        patient.description.toLowerCase().includes(normalizedQuery) ||
+        patient.injuryTag.toLowerCase().includes(normalizedQuery);
+      const matchesSeverity =
+        severityFilter === "All" || categoryToSeverity(patient.category) === severityFilter;
+      const matchesInjury = injuryFilter === "All" || patient.injuryTag === injuryFilter;
+      return matchesSearch && matchesSeverity && matchesInjury;
+    });
+  }, [injuryFilter, patients, searchQuery, severityFilter]);
+  const updates = filteredPatients.filter((patient) => patient.hasUpdate).slice(0, 6);
+
+  function toggleSearch() {
+    setIsSearchVisible((isVisible) => {
+      const nextValue = !isVisible;
+      if (!nextValue) {
+        setSearchQuery("");
+      }
+      return nextValue;
+    });
+  }
 
   return (
     <SafeAreaView style={styles.screen}>
       <StatusBar style="dark" />
-      <View style={styles.header}>
-        <View>
-          <Text style={styles.eyebrow}>Acuvia Nurse</Text>
-          <Text style={styles.title}>Priority Queue</Text>
+      <ScrollView contentContainerStyle={styles.page}>
+        <View style={styles.header}>
+          <View style={styles.brandRow}>
+            <LogoMark />
+            <Text style={styles.brandText}>ACUVIA</Text>
+            <Text style={styles.roleText}>NURSE</Text>
+          </View>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => loadPatients({ showLoading: true })}
+            style={styles.avatarButton}
+          >
+            {isRefreshing ? <ActivityIndicator color="#ffffff" size="small" /> : <Text style={styles.avatarText}>RC</Text>}
+          </Pressable>
         </View>
-        <Pressable
-          accessibilityRole="button"
-          onPress={handleRefreshPatients}
-          style={styles.iconButton}
-        >
-          <Text style={styles.iconButtonText}>R</Text>
-        </Pressable>
-      </View>
 
-      <View style={styles.summaryRow}>
-        <View style={styles.summaryPanel}>
-          <Text style={styles.summaryValue}>{prioritizedPatients.length}</Text>
-          <Text style={styles.summaryLabel}>Patients</Text>
+        <View style={styles.statsRow}>
+          <View style={styles.statCard}>
+            <Text style={styles.statValue}>{patients.length}</Text>
+            <Text style={styles.statLabel}>PATIENTS</Text>
+          </View>
+          <View style={styles.statCard}>
+            <Text style={styles.statValue}>{criticalCount}</Text>
+            <Text style={styles.statLabel}>CRITICAL</Text>
+          </View>
+          <View style={styles.statCard}>
+            <Text style={styles.statValue}>{isRefreshing ? "..." : formatAverageWait(averageWaitMinutes)}</Text>
+            <Text style={styles.statLabel}>AVG WAIT</Text>
+          </View>
         </View>
-        <View style={styles.summaryPanel}>
-          <Text style={styles.summaryValue}>{criticalCount}</Text>
-          <Text style={styles.summaryLabel}>Critical</Text>
-        </View>
-        <View style={styles.summaryPanel}>
-          <Text style={styles.summaryValue}>{isRefreshing ? "..." : "Live"}</Text>
-          <Text style={styles.summaryLabel}>Queue</Text>
-        </View>
-      </View>
 
-      {queueError ? (
-        <View style={styles.errorPanel}>
-          <Text style={styles.errorText}>{queueError}</Text>
-        </View>
-      ) : null}
-
-      <ScrollView contentContainerStyle={styles.listContent}>
-        {prioritizedPatients.map((patient, index) => {
-          const severityStyle = getSeverityStyle(patient.severity);
-
-          return (
-            <Pressable
-              accessibilityRole="button"
-              key={patient.id}
-              onPress={() => handlePatientSelect(patient)}
-              style={styles.patientCard}
-            >
-              <View style={styles.patientTopRow}>
-                <Text style={styles.priorityNumber}>#{index + 1}</Text>
-                <View style={[styles.severityBadge, severityStyle.badge]}>
-                  <Text style={[styles.severityText, severityStyle.text]}>
-                    {patient.severity.toUpperCase()}
-                  </Text>
-                </View>
-              </View>
-
-              <Text style={styles.patientName}>
-                {patient.name}, {patient.age}
-              </Text>
-              <Text style={styles.injuryText}>{patient.injury}</Text>
-
-              <View style={styles.detailGrid}>
-                <View style={styles.detailItem}>
-                  <Text style={styles.detailLabel}>Vitals</Text>
-                  <Text style={styles.detailValue}>{patient.vitals}</Text>
-                </View>
-                <View style={styles.detailItem}>
-                  <Text style={styles.detailLabel}>Location</Text>
-                  <Text style={styles.detailValue}>{patient.location}</Text>
-                </View>
-                <View style={styles.detailItem}>
-                  <Text style={styles.detailLabel}>Wait</Text>
-                  <Text style={styles.detailValue}>{patient.waitTime}</Text>
-                </View>
-              </View>
-            </Pressable>
-          );
-        })}
-      </ScrollView>
-
-      <View style={styles.footer}>
-        {selectedPatientSummary ? (
-          <View style={styles.summaryPanelSelected}>
-            <Text style={styles.backendLabel}>Selected Patient</Text>
-            <Text style={styles.backendValue}>{selectedPatientLabel}</Text>
-            <Text style={styles.selectedSummaryText}>{selectedPatientSummary}</Text>
+        {queueError ? (
+          <View style={styles.errorPanel}>
+            <Text style={styles.errorText}>{queueError}</Text>
           </View>
         ) : null}
-        <View style={styles.backendPanel}>
-          <Text style={styles.backendLabel}>Backend</Text>
-          <Text style={styles.backendValue}>{backendUrl}</Text>
+
+        {isSearchVisible ? (
+          <View style={styles.searchPanel}>
+            <MagnifierIcon />
+            <TextInput
+              autoCapitalize="words"
+              autoCorrect={false}
+              onChangeText={setSearchQuery}
+              placeholder="Search patient name, injury, or note"
+              placeholderTextColor="#8a8a8a"
+              style={styles.searchInput}
+              value={searchQuery}
+            />
+            {searchQuery ? (
+              <Pressable accessibilityRole="button" onPress={() => setSearchQuery("")} style={styles.clearSearchButton}>
+                <Text style={styles.clearSearchText}>Clear</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
+
+        <View style={styles.columns}>
+          <View style={styles.column}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>PRIORITY QUEUE</Text>
+              <View style={styles.filters}>
+                <SearchButton active={isSearchVisible} onPress={toggleSearch} />
+                <FilterPill
+                  active={severityFilter !== "All"}
+                  label={severityFilter === "All" ? "Severity" : severityFilter}
+                  onPress={() => setActiveDropdown("severity")}
+                />
+                <FilterPill
+                  active={injuryFilter !== "All"}
+                  label={injuryFilter === "All" ? "Injury Type" : injuryFilter}
+                  onPress={() => setActiveDropdown("injury")}
+                />
+              </View>
+            </View>
+            <View style={styles.cardStack}>
+              {filteredPatients.map((patient) => (
+                <QueueCard
+                  key={patient.id}
+                  patient={patient}
+                  selected={patient.id === selectedPatientId}
+                  onPress={(nextPatient) => {
+                    setSelectedPatientId(nextPatient.id);
+                    setIsPatientModalVisible(true);
+                  }}
+                />
+              ))}
+              {filteredPatients.length === 0 ? (
+                <View style={styles.emptyQueueCard}>
+                  <Text style={styles.emptyQueueTitle}>No matching patients</Text>
+                  <Text style={styles.emptyQueueText}>Adjust search, severity, or injury type.</Text>
+                </View>
+              ) : null}
+            </View>
+          </View>
+
+          <View style={styles.divider} />
+
+          <View style={styles.column}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>PATIENT UPDATES</Text>
+              <View style={styles.filters}>
+                <SearchButton active={isSearchVisible} onPress={toggleSearch} />
+                <FilterPill
+                  active={severityFilter !== "All"}
+                  label={severityFilter === "All" ? "Severity" : severityFilter}
+                  onPress={() => setActiveDropdown("severity")}
+                />
+                <FilterPill
+                  active={injuryFilter !== "All"}
+                  label={injuryFilter === "All" ? "Injury Type" : injuryFilter}
+                  onPress={() => setActiveDropdown("injury")}
+                />
+              </View>
+            </View>
+            <View style={styles.cardStack}>
+              {(updates.length ? updates : filteredPatients.slice(0, 3)).map((patient) => (
+                <UpdateCard key={patient.id} patient={patient} />
+              ))}
+              {filteredPatients.length === 0 ? (
+                <View style={styles.emptyQueueCard}>
+                  <Text style={styles.emptyQueueTitle}>No matching updates</Text>
+                  <Text style={styles.emptyQueueText}>Filters apply to patient updates too.</Text>
+                </View>
+              ) : null}
+            </View>
+          </View>
         </View>
-        <Pressable
-          accessibilityRole="button"
-          onPress={requestDownloadableAppBuild}
-          style={styles.downloadButton}
-        >
-          <Text style={styles.downloadButtonText}>Download App</Text>
+      </ScrollView>
+
+      <Modal
+        animationType="fade"
+        onRequestClose={() => setIsPatientModalVisible(false)}
+        transparent
+        visible={isPatientModalVisible && Boolean(selectedPatient)}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={() => setIsPatientModalVisible(false)}>
+          <Pressable style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Patient Details</Text>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => setIsPatientModalVisible(false)}
+                style={styles.modalCloseButton}
+              >
+                <Text style={styles.modalCloseText}>Close</Text>
+              </Pressable>
+            </View>
+            <ScrollView>
+              <PatientDetail patient={selectedPatient} />
+            </ScrollView>
+          </Pressable>
         </Pressable>
-      </View>
+      </Modal>
+
+      <FilterDropdown
+        onClose={() => setActiveDropdown(null)}
+        onSelect={setSeverityFilter}
+        options={SEVERITY_FILTER_OPTIONS}
+        selectedValue={severityFilter}
+        title="Severity"
+        visible={activeDropdown === "severity"}
+      />
+      <FilterDropdown
+        onClose={() => setActiveDropdown(null)}
+        onSelect={setInjuryFilter}
+        options={injuryFilterOptions}
+        selectedValue={injuryFilter}
+        title="Injury Type"
+        visible={activeDropdown === "injury"}
+      />
     </SafeAreaView>
   );
 }
 
-const severityStyles = StyleSheet.create({
-  "esi 1": {
-    badge: {
-      backgroundColor: "#ffe1df"
-    },
-    text: {
-      color: "#9d241b"
-    }
-  },
-  "esi 2": {
-    badge: {
-      backgroundColor: "#fff0cf"
-    },
-    text: {
-      color: "#7a4b00"
-    }
-  },
-  "esi 3": {
-    badge: {
-      backgroundColor: "#dfefff"
-    },
-    text: {
-      color: "#15548a"
-    }
-  },
-  "esi 4": {
-    badge: {
-      backgroundColor: "#e8f4df"
-    },
-    text: {
-      color: "#2a6a1d"
-    }
-  },
-  "esi 5": {
-    badge: {
-      backgroundColor: "#dff4e8"
-    },
-    text: {
-      color: "#19633d"
-    }
-  },
-  low: {
-    badge: {
-      backgroundColor: "#dff4e8"
-    },
-    text: {
-      color: "#19633d"
-    }
-  }
-});
+const severityTones = {
+  1: { bg: "#f3b0a6", fg: "#d34725" },
+  2: { bg: "#fde1a9", fg: "#e4a424" },
+  3: { bg: "#f7df9a", fg: "#e4bc37" },
+  4: { bg: "#edf1a3", fg: "#d0c638" },
+  5: { bg: "#b7d2a2", fg: "#52771e" }
+};
+
+const fontFamily = "System";
 
 const styles = StyleSheet.create({
   screen: {
     flex: 1,
-    backgroundColor: "#f5f7fa"
+    backgroundColor: "#f8f8f8"
+  },
+  page: {
+    gap: 16,
+    minHeight: "100%",
+    padding: 24
   },
   header: {
     alignItems: "center",
     flexDirection: "row",
-    justifyContent: "space-between",
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 12
+    justifyContent: "space-between"
   },
-  eyebrow: {
-    color: "#5d6878",
-    fontSize: 13,
-    fontWeight: "700",
-    letterSpacing: 0,
-    textTransform: "uppercase"
-  },
-  title: {
-    color: "#17202e",
-    fontSize: 30,
-    fontWeight: "800",
-    letterSpacing: 0,
-    marginTop: 2
-  },
-  iconButton: {
+  brandRow: {
     alignItems: "center",
-    backgroundColor: "#ffffff",
-    borderColor: "#dce2ea",
-    borderRadius: 8,
-    borderWidth: 1,
+    flexDirection: "row",
+    gap: 8
+  },
+  logoMark: {
+    flexDirection: "row",
+    height: 36,
+    width: 44
+  },
+  logoPersonLeft: {
+    height: 32,
+    marginTop: 2,
+    position: "relative",
+    width: 13
+  },
+  logoHeadLeft: {
+    backgroundColor: "#0045d0",
+    borderRadius: 7,
+    height: 13,
+    left: 1,
+    position: "absolute",
+    top: 0,
+    width: 11
+  },
+  logoBodyLeft: {
+    backgroundColor: "#0045d0",
+    borderBottomLeftRadius: 9,
+    borderBottomRightRadius: 9,
+    borderTopLeftRadius: 7,
+    borderTopRightRadius: 7,
+    height: 22,
+    left: 0,
+    position: "absolute",
+    top: 10,
+    width: 13
+  },
+  logoHeart: {
+    height: 19,
+    marginHorizontal: 2,
+    marginTop: 14,
+    position: "relative",
+    width: 15
+  },
+  logoHeartDotLeft: {
+    backgroundColor: "#0045d0",
+    borderRadius: 5,
+    height: 10,
+    left: 1,
+    position: "absolute",
+    top: 0,
+    width: 9
+  },
+  logoHeartDotRight: {
+    backgroundColor: "#0045d0",
+    borderRadius: 5,
+    height: 10,
+    position: "absolute",
+    right: 1,
+    top: 0,
+    width: 9
+  },
+  logoHeartBase: {
+    backgroundColor: "#0045d0",
+    borderBottomLeftRadius: 9,
+    borderBottomRightRadius: 9,
+    height: 14,
+    left: 2,
+    position: "absolute",
+    top: 5,
+    transform: [{ rotate: "45deg" }],
+    width: 11
+  },
+  logoPersonRight: {
+    height: 32,
+    marginTop: 2,
+    position: "relative",
+    width: 14
+  },
+  logoHeadRight: {
+    backgroundColor: "#83abfb",
+    borderRadius: 7,
+    height: 13,
+    left: 1,
+    position: "absolute",
+    top: 0,
+    width: 12
+  },
+  logoBodyRight: {
+    backgroundColor: "#83abfb",
+    borderBottomLeftRadius: 9,
+    borderBottomRightRadius: 9,
+    borderTopLeftRadius: 7,
+    borderTopRightRadius: 7,
+    height: 22,
+    left: 0,
+    position: "absolute",
+    top: 10,
+    width: 14
+  },
+  brandText: {
+    color: "#0045d0",
+    fontFamily,
+    fontSize: 40,
+    fontWeight: "800",
+    letterSpacing: 0
+  },
+  roleText: {
+    color: "#5a5a5a",
+    fontFamily,
+    fontSize: 18,
+    fontWeight: "800",
+    marginLeft: 4,
+    marginTop: 12
+  },
+  avatarButton: {
+    alignItems: "center",
+    backgroundColor: "#0045d0",
+    borderRadius: 22,
     height: 44,
     justifyContent: "center",
     width: 44
   },
-  iconButtonText: {
-    color: "#263241",
-    fontSize: 22,
-    fontWeight: "700"
+  avatarText: {
+    color: "#ffffff",
+    fontFamily,
+    fontSize: 16,
+    fontWeight: "600"
   },
-  summaryRow: {
+  statsRow: {
     flexDirection: "row",
-    gap: 10,
-    paddingHorizontal: 20,
-    paddingVertical: 10
+    gap: 24
+  },
+  statCard: {
+    backgroundColor: "#ffffff",
+    borderColor: "#e7e7e7",
+    borderRadius: 8,
+    borderWidth: 1,
+    flex: 1,
+    minHeight: 60,
+    paddingHorizontal: 16,
+    paddingVertical: 12
+  },
+  statValue: {
+    color: "#000000",
+    fontFamily,
+    fontSize: 26,
+    fontWeight: "800",
+    lineHeight: 28
+  },
+  statLabel: {
+    color: "#5a5a5a",
+    fontFamily,
+    fontSize: 13,
+    fontWeight: "800",
+    lineHeight: 15
   },
   errorPanel: {
     backgroundColor: "#ffe1df",
     borderColor: "#f3b2ad",
     borderRadius: 8,
     borderWidth: 1,
-    marginHorizontal: 20,
-    marginTop: 4,
     paddingHorizontal: 12,
     paddingVertical: 10
   },
   errorText: {
     color: "#9d241b",
-    fontSize: 13,
+    fontFamily,
+    fontSize: 15,
     fontWeight: "700"
   },
-  summaryPanel: {
+  detailPanel: {
     backgroundColor: "#ffffff",
-    borderColor: "#dce2ea",
+    borderColor: "#e7e7e7",
     borderRadius: 8,
     borderWidth: 1,
-    flex: 1,
-    paddingHorizontal: 12,
-    paddingVertical: 12
+    gap: 14,
+    paddingHorizontal: 28,
+    paddingVertical: 24
   },
-  summaryValue: {
-    color: "#17202e",
-    fontSize: 20,
+  emptyDetailPanel: {
+    minHeight: 170
+  },
+  emptyTitle: {
+    color: "#151515",
+    fontFamily,
+    fontSize: 28,
     fontWeight: "800"
   },
-  summaryLabel: {
-    color: "#6a7585",
-    fontSize: 12,
-    fontWeight: "700",
-    marginTop: 2,
-    textTransform: "uppercase"
+  emptyText: {
+    color: "#5a5a5a",
+    fontFamily,
+    fontSize: 14,
+    marginTop: 4
   },
-  listContent: {
-    gap: 12,
-    paddingHorizontal: 20,
-    paddingTop: 8,
-    paddingBottom: 20
+  detailHeader: {
+    alignItems: "flex-start",
+    flexDirection: "row",
+    justifyContent: "space-between"
   },
-  patientCard: {
+  detailIdentity: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 18
+  },
+  detailName: {
+    color: "#151515",
+    fontFamily,
+    fontSize: 36,
+    fontWeight: "800",
+    letterSpacing: 0,
+    lineHeight: 40
+  },
+  detailMetaLabel: {
+    color: "#8a8a8a",
+    fontFamily,
+    fontSize: 13,
+    lineHeight: 15
+  },
+  detailMetaValue: {
+    color: "#8a8a8a",
+    fontFamily,
+    fontSize: 13,
+    lineHeight: 15
+  },
+  severityBadge: {
+    alignItems: "center",
+    borderRadius: 6,
+    justifyContent: "center",
+    minWidth: 52,
+    paddingHorizontal: 9,
+    paddingVertical: 6
+  },
+  severityBadgeCompact: {
+    minWidth: 40,
+    paddingHorizontal: 7,
+    paddingVertical: 4
+  },
+  severityText: {
+    fontFamily,
+    fontSize: 16,
+    fontWeight: "800",
+    lineHeight: 18
+  },
+  severityTextCompact: {
+    fontSize: 13,
+    lineHeight: 15
+  },
+  intakeGrid: {
+    columnGap: 28,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    rowGap: 12
+  },
+  intakeItem: {
+    width: "22%"
+  },
+  reasonItem: {
+    flexGrow: 1,
+    width: "46%"
+  },
+  intakeLabel: {
+    color: "#000000",
+    fontFamily,
+    fontSize: 17,
+    fontWeight: "800",
+    lineHeight: 20
+  },
+  intakeValue: {
+    color: "#151515",
+    fontFamily,
+    fontSize: 15,
+    lineHeight: 19,
+    marginTop: 2
+  },
+  columns: {
+    flexDirection: "row",
+    gap: 18
+  },
+  column: {
+    flex: 1
+  },
+  divider: {
+    backgroundColor: "#d9d9d9",
+    borderRadius: 4,
+    width: 2
+  },
+  sectionHeader: {
+    alignItems: "center",
     backgroundColor: "#ffffff",
-    borderColor: "#dce2ea",
+    borderColor: "#e7e7e7",
     borderRadius: 8,
     borderWidth: 1,
-    padding: 16
+    flexDirection: "row",
+    justifyContent: "space-between",
+    minHeight: 48,
+    paddingHorizontal: 20
   },
-  patientTopRow: {
+  sectionTitle: {
+    color: "#000000",
+    fontFamily,
+    fontSize: 18,
+    fontWeight: "900",
+    letterSpacing: 0
+  },
+  filters: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 6
+  },
+  searchButton: {
+    alignItems: "center",
+    backgroundColor: "#ffffff",
+    borderColor: "#e7e7e7",
+    borderRadius: 4,
+    borderWidth: 1,
+    height: 28,
+    justifyContent: "center",
+    width: 32
+  },
+  searchButtonActive: {
+    borderColor: "#0045d0"
+  },
+  magnifierIcon: {
+    height: 16,
+    position: "relative",
+    width: 16
+  },
+  magnifierCircle: {
+    borderColor: "#5a5a5a",
+    borderRadius: 6,
+    borderWidth: 2,
+    height: 11,
+    left: 1,
+    position: "absolute",
+    top: 1,
+    width: 11
+  },
+  magnifierHandle: {
+    backgroundColor: "#5a5a5a",
+    borderRadius: 2,
+    height: 7,
+    position: "absolute",
+    right: 1,
+    top: 10,
+    transform: [{ rotate: "-45deg" }],
+    width: 2
+  },
+  searchPanel: {
+    alignItems: "center",
+    backgroundColor: "#ffffff",
+    borderColor: "#e7e7e7",
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 10,
+    minHeight: 48,
+    paddingHorizontal: 14
+  },
+  searchInput: {
+    color: "#151515",
+    flex: 1,
+    fontFamily,
+    fontSize: 17,
+    fontWeight: "500",
+    minHeight: 44
+  },
+  clearSearchButton: {
+    alignItems: "center",
+    backgroundColor: "rgba(138, 138, 138, 0.14)",
+    borderColor: "rgba(138, 138, 138, 0.35)",
+    borderRadius: 6,
+    borderWidth: 1,
+    minHeight: 30,
+    justifyContent: "center",
+    paddingHorizontal: 12
+  },
+  clearSearchText: {
+    color: "#5a5a5a",
+    fontFamily,
+    fontSize: 13,
+    fontWeight: "800"
+  },
+  filterPill: {
+    alignItems: "center",
+    backgroundColor: "#ffffff",
+    borderColor: "#e7e7e7",
+    borderRadius: 4,
+    borderWidth: 1,
+    flexDirection: "row",
+    height: 28,
+    justifyContent: "center",
+    minWidth: 23,
+    paddingHorizontal: 8
+  },
+  filterPillActive: {
+    borderColor: "#0045d0"
+  },
+  filterText: {
+    color: "#5a5a5a",
+    fontFamily,
+    fontSize: 12,
+    lineHeight: 14
+  },
+  filterChevronIcon: {
+    borderBottomColor: "#5a5a5a",
+    borderBottomWidth: 2,
+    borderRightColor: "#5a5a5a",
+    borderRightWidth: 2,
+    height: 7,
+    marginLeft: 8,
+    marginTop: -3,
+    transform: [{ rotate: "45deg" }],
+    width: 7
+  },
+  cardStack: {
+    gap: 8,
+    marginTop: 8
+  },
+  emptyQueueCard: {
+    backgroundColor: "#ffffff",
+    borderColor: "#e7e7e7",
+    borderRadius: 8,
+    borderWidth: 1,
+    gap: 4,
+    paddingHorizontal: 20,
+    paddingVertical: 18
+  },
+  emptyQueueTitle: {
+    color: "#151515",
+    fontFamily,
+    fontSize: 18,
+    fontWeight: "800"
+  },
+  emptyQueueText: {
+    color: "#5a5a5a",
+    fontFamily,
+    fontSize: 14,
+    fontWeight: "500"
+  },
+  queueCard: {
+    backgroundColor: "#ffffff",
+    borderColor: "#e7e7e7",
+    borderRadius: 8,
+    borderWidth: 1,
+    minHeight: 126,
+    paddingHorizontal: 20,
+    paddingVertical: 16
+  },
+  queueCardSelected: {
+    borderColor: "#cbd9ff"
+  },
+  cardTopLine: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between"
+  },
+  patientNameLine: {
+    alignItems: "center",
+    flexDirection: "row",
+    flexShrink: 1,
+    gap: 7
+  },
+  rankText: {
+    color: "#5a5a5a",
+    fontFamily,
+    fontSize: 13,
+    fontWeight: "600"
+  },
+  queueName: {
+    color: "#151515",
+    flexShrink: 1,
+    fontFamily,
+    fontSize: 23,
+    fontWeight: "700",
+    lineHeight: 27
+  },
+  alertDot: {
+    backgroundColor: "#ed522c",
+    borderRadius: 3,
+    height: 5,
+    width: 5
+  },
+  injuryPill: {
+    backgroundColor: "#eaeaea",
+    borderRadius: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 2
+  },
+  injuryPillText: {
+    color: "#5a5a5a",
+    fontFamily,
+    fontSize: 12,
+    fontWeight: "600",
+    lineHeight: 15
+  },
+  queueDescription: {
+    color: "#151515",
+    fontFamily,
+    fontSize: 16,
+    lineHeight: 21,
+    marginTop: 8
+  },
+  queueFooter: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 16
+  },
+  timeText: {
+    color: "#8a8a8a",
+    fontFamily,
+    fontSize: 13,
+    lineHeight: 16
+  },
+  attendButton: {
+    alignItems: "center",
+    backgroundColor: "rgba(138, 138, 138, 0.2)",
+    borderColor: "rgba(138, 138, 138, 0.5)",
+    borderRadius: 4,
+    borderWidth: 1,
+    height: 28,
+    justifyContent: "center",
+    paddingHorizontal: 10
+  },
+  attendButtonText: {
+    color: "#8a8a8a",
+    fontFamily,
+    fontSize: 12,
+    fontWeight: "600"
+  },
+  updateCard: {
+    backgroundColor: "#ffffff",
+    borderColor: "#e7e7e7",
+    borderRadius: 8,
+    borderWidth: 1,
+    minHeight: 126,
+    paddingHorizontal: 22,
+    paddingVertical: 16
+  },
+  updateMain: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 10
+  },
+  updateName: {
+    color: "#151515",
+    fontFamily,
+    fontSize: 23,
+    fontWeight: "600",
+    lineHeight: 27
+  },
+  updateFooter: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 16
+  },
+  updateActions: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 8
+  },
+  updateActionButton: {
+    alignItems: "center",
+    borderRadius: 4,
+    borderWidth: 1,
+    height: 26,
+    justifyContent: "center",
+    width: 44
+  },
+  acceptButton: {
+    backgroundColor: "rgba(137, 183, 72, 0.2)",
+    borderColor: "rgba(137, 183, 72, 0.5)"
+  },
+  dismissButton: {
+    backgroundColor: "rgba(237, 82, 44, 0.2)",
+    borderColor: "rgba(237, 82, 44, 0.5)"
+  },
+  acceptText: {
+    color: "#52771e",
+    fontFamily,
+    fontSize: 15,
+    fontWeight: "700"
+  },
+  dismissText: {
+    color: "#ed522c",
+    fontFamily,
+    fontSize: 15,
+    fontWeight: "700"
+  },
+  modalBackdrop: {
+    alignItems: "center",
+    backgroundColor: "rgba(0, 0, 0, 0.32)",
+    flex: 1,
+    justifyContent: "center",
+    padding: 28
+  },
+  modalCard: {
+    backgroundColor: "#f8f8f8",
+    borderColor: "#e7e7e7",
+    borderRadius: 10,
+    borderWidth: 1,
+    maxHeight: "88%",
+    maxWidth: 980,
+    padding: 16,
+    width: "92%"
+  },
+  modalHeader: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 12
+  },
+  modalTitle: {
+    color: "#151515",
+    fontFamily,
+    fontSize: 22,
+    fontWeight: "800"
+  },
+  modalCloseButton: {
+    alignItems: "center",
+    backgroundColor: "#0045d0",
+    borderRadius: 8,
+    minHeight: 36,
+    justifyContent: "center",
+    paddingHorizontal: 16
+  },
+  modalCloseText: {
+    color: "#ffffff",
+    fontFamily,
+    fontSize: 15,
+    fontWeight: "800"
+  },
+  dropdownBackdrop: {
+    alignItems: "center",
+    backgroundColor: "rgba(0, 0, 0, 0.16)",
+    flex: 1,
+    justifyContent: "center",
+    padding: 28
+  },
+  dropdownCard: {
+    backgroundColor: "#ffffff",
+    borderColor: "#e7e7e7",
+    borderRadius: 8,
+    borderWidth: 1,
+    maxHeight: "72%",
+    minWidth: 320,
+    padding: 14
+  },
+  dropdownHeader: {
     alignItems: "center",
     flexDirection: "row",
     justifyContent: "space-between",
     marginBottom: 10
   },
-  priorityNumber: {
-    color: "#5d6878",
-    fontSize: 14,
-    fontWeight: "800"
-  },
-  severityBadge: {
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 5
-  },
-  severityText: {
-    fontSize: 12,
-    fontWeight: "800",
-    letterSpacing: 0
-  },
-  patientName: {
-    color: "#17202e",
+  dropdownTitle: {
+    color: "#151515",
+    fontFamily,
     fontSize: 20,
-    fontWeight: "800",
-    marginBottom: 4
+    fontWeight: "900"
   },
-  injuryText: {
-    color: "#334155",
-    fontSize: 15,
-    lineHeight: 21,
-    marginBottom: 14
-  },
-  detailGrid: {
-    borderTopColor: "#e6ebf2",
-    borderTopWidth: 1,
-    flexDirection: "row",
-    gap: 8,
-    paddingTop: 12
-  },
-  detailItem: {
-    flex: 1
-  },
-  detailLabel: {
-    color: "#6a7585",
-    fontSize: 11,
-    fontWeight: "800",
-    marginBottom: 3,
-    textTransform: "uppercase"
-  },
-  detailValue: {
-    color: "#263241",
-    fontSize: 13,
-    fontWeight: "600",
-    lineHeight: 18
-  },
-  footer: {
-    backgroundColor: "#ffffff",
-    borderTopColor: "#dce2ea",
-    borderTopWidth: 1,
-    gap: 12,
-    padding: 16
-  },
-  backendPanel: {
-    gap: 2
-  },
-  summaryPanelSelected: {
-    backgroundColor: "#f3f7ff",
-    borderColor: "#cddcf5",
-    borderRadius: 8,
-    borderWidth: 1,
-    gap: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 10
-  },
-  selectedSummaryText: {
-    color: "#263241",
-    fontSize: 12,
-    fontWeight: "500",
-    lineHeight: 17
-  },
-  backendLabel: {
-    color: "#6a7585",
-    fontSize: 11,
-    fontWeight: "800",
-    textTransform: "uppercase"
-  },
-  backendValue: {
-    color: "#263241",
-    fontSize: 13,
-    fontWeight: "600"
-  },
-  downloadButton: {
+  dropdownCloseButton: {
     alignItems: "center",
-    backgroundColor: "#1f6f8b",
-    borderRadius: 8,
-    minHeight: 48,
+    backgroundColor: "rgba(138, 138, 138, 0.14)",
+    borderColor: "rgba(138, 138, 138, 0.35)",
+    borderRadius: 6,
+    borderWidth: 1,
+    minHeight: 32,
     justifyContent: "center",
-    paddingHorizontal: 16
+    paddingHorizontal: 12
   },
-  downloadButtonText: {
-    color: "#ffffff",
-    fontSize: 16,
+  dropdownCloseText: {
+    color: "#5a5a5a",
+    fontFamily,
+    fontSize: 13,
     fontWeight: "800"
+  },
+  dropdownOptions: {
+    gap: 8
+  },
+  dropdownOption: {
+    backgroundColor: "#ffffff",
+    borderColor: "#e7e7e7",
+    borderRadius: 6,
+    borderWidth: 1,
+    minHeight: 42,
+    justifyContent: "center",
+    paddingHorizontal: 12
+  },
+  dropdownOptionSelected: {
+    backgroundColor: "#eef4ff",
+    borderColor: "#0045d0"
+  },
+  dropdownOptionText: {
+    color: "#151515",
+    fontFamily,
+    fontSize: 16,
+    fontWeight: "700"
+  },
+  dropdownOptionTextSelected: {
+    color: "#0045d0"
   }
 });

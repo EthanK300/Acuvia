@@ -3,7 +3,7 @@
     "name": "Acuvia Nurse UI",
     "slug": "acuvia-nurse-ui",
     "version": "1.0.0",
-    "orientation": "portrait",
+    "orientation": "landscape",
     "userInterfaceStyle": "automatic",
     "assetBundlePatterns": [
       "**/*"
