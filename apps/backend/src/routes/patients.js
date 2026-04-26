@@ -10,6 +10,7 @@ import {
   PATIENT_SESSION_COOKIE,
   readCookieValue
 } from "../services/session.js";
+import { classifyPatientIntake } from "../services/aiTriage.js";
 import { uploadPatientMedia } from "../services/patientStorage.js";
 
 export const patientsRouter = Router();
@@ -103,11 +104,17 @@ patientsRouter.post("/", async (req, res) => {
     const firstName = normalizeNonEmptyString(rawBody?.firstName);
     const lastName = normalizeNonEmptyString(rawBody?.lastName);
     const birthday = normalizeNonEmptyString(rawBody?.birthday);
+    const intakeText =
+      normalizeNonEmptyString(rawBody?.description) ||
+      normalizeNonEmptyString(rawBody?.incident) ||
+      normalizeNonEmptyString(rawBody?.notes) ||
+      normalizeNonEmptyString(rawBody?.data?.text);
 
-    if (!firstName || !lastName || !birthday) {
+    if (!firstName || !lastName || !birthday || !intakeText) {
       return res.status(400).json({
         ok: false,
-        message: "firstName, lastName, and birthday are required"
+        message:
+          "firstName, lastName, birthday, and incident description are required"
       });
     }
 
@@ -119,10 +126,18 @@ patientsRouter.post("/", async (req, res) => {
     }
 
     const { startedAt, expiresAt } = buildSessionWindow();
-    const patient = await createPatientWithSession({
+    const intakeClassification = await classifyPatientIntake({
       firstName,
       lastName,
       birthday,
+      incident: intakeText
+    });
+    const patient = await createPatientWithSession({
+      category: intakeClassification.category,
+      firstName,
+      lastName,
+      birthday,
+      description: intakeClassification.description,
       sessionStart: startedAt,
       sessionExpiresAt: expiresAt
     });
@@ -141,9 +156,11 @@ patientsRouter.post("/", async (req, res) => {
       ok: true,
       patientUuid: patient.uuid,
       patient: {
+        category: patient.category,
         firstName: patient.first_name,
         lastName: patient.last_name,
-        birthday: patient.birthday
+        birthday: patient.birthday,
+        description: patient.description
       },
       sessionStart: patient.session_start,
       sessionExpiresAt: patient.session_expires_at,
