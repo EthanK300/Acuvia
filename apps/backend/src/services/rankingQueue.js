@@ -3,7 +3,7 @@ import {
   listCategoryPatientsForRanking,
   updateCategoryRanks
 } from "../db/patients.js";
-import { compareCasesForRanking } from "./aiTriage.js";
+import { chooseInsertionIndexForCategory } from "./aiTriage.js";
 
 const queue = [];
 const queuedByPatient = new Set();
@@ -50,47 +50,26 @@ function compareCases(a, b) {
   return aCreated - bCreated;
 }
 
-async function compareCasesWithAI(targetCase, referenceCase, { allowFallback = true } = {}) {
+async function determineInsertionIndex(candidates, targetCase, { requireAiComparison = true } = {}) {
+  const sortedCandidates = [...candidates].sort(compareCases);
+
   try {
-    const aiResult = await compareCasesForRanking(targetCase, referenceCase);
-    if (aiResult.verdict === "more_severe") {
-      return -1;
-    }
-    if (aiResult.verdict === "less_severe") {
-      return 1;
-    }
+    const aiChoice = await chooseInsertionIndexForCategory(targetCase, sortedCandidates);
+    return {
+      insertionIndex: aiChoice.insertIndex,
+      sortedCandidates
+    };
   } catch (error) {
-    if (!allowFallback) {
+    if (requireAiComparison) {
       throw error;
     }
-    console.warn("[ranking-queue] AI comparison failed, using heuristic fallback:", error.message);
+    console.warn("[ranking-queue] AI insertion failed, using heuristic fallback:", error.message);
+    const fallbackIndex = sortedCandidates.findIndex((item) => compareCases(targetCase, item) < 0);
+    return {
+      insertionIndex: fallbackIndex === -1 ? sortedCandidates.length : fallbackIndex,
+      sortedCandidates
+    };
   }
-
-  const fallback = compareCases(targetCase, referenceCase);
-  if (fallback < 0) {
-    return -1;
-  }
-  if (fallback > 0) {
-    return 1;
-  }
-  return 0;
-}
-
-async function findInsertionIndexBinary(sortedCases, targetCase, options = {}) {
-  let low = 0;
-  let high = sortedCases.length;
-
-  while (low < high) {
-    const mid = Math.floor((low + high) / 2);
-    const comparison = await compareCasesWithAI(targetCase, sortedCases[mid], options);
-    if (comparison > 0) {
-      low = mid + 1;
-    } else {
-      high = mid;
-    }
-  }
-
-  return low;
 }
 
 export async function calculateInitialRankForCase(targetCase, { requireAiComparison = true } = {}) {
@@ -100,19 +79,18 @@ export async function calculateInitialRankForCase(targetCase, { requireAiCompari
   }
 
   const categoryPatients = await listCategoryPatientsForRanking(category);
-  categoryPatients.sort(compareCases);
   console.log("[ranking-queue] initial rank candidates", {
     category,
     sameCategoryCount: categoryPatients.length,
     requireAiComparison
   });
 
-  const insertionIndex = await findInsertionIndexBinary(categoryPatients, {
+  const { insertionIndex } = await determineInsertionIndex(categoryPatients, {
     ...targetCase,
     created_at: targetCase.created_at || new Date().toISOString(),
     latest_payload: targetCase.latest_payload || null
   }, {
-    allowFallback: !requireAiComparison
+    requireAiComparison
   });
 
   return insertionIndex + 1;
@@ -131,10 +109,12 @@ async function assignRankForPatient(patientUuid) {
 
   const categoryPatients = await listCategoryPatientsForRanking(category);
   const withoutTarget = categoryPatients.filter((item) => item.uuid !== patientUuid);
-  withoutTarget.sort(compareCases);
 
-  const insertionIndex = await findInsertionIndexBinary(withoutTarget, patient);
-  const ordered = [...withoutTarget];
+  const { insertionIndex, sortedCandidates } = await determineInsertionIndex(withoutTarget, patient, {
+    requireAiComparison: false
+  });
+
+  const ordered = [...sortedCandidates];
   ordered.splice(insertionIndex, 0, patient);
 
   const assignments = ordered.map((item, index) => ({

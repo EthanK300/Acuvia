@@ -108,10 +108,10 @@ async function checkPatientSession() {
   return requestJson(`${patientsApiUrl}/session`);
 }
 
-async function createPatientEntry({ firstName, lastName, birthday }) {
+async function createPatientEntry(payload) {
   return requestJson(patientsApiUrl, {
     method: "POST",
-    body: JSON.stringify({ firstName, lastName, birthday })
+    body: JSON.stringify(payload)
   });
 }
 
@@ -123,6 +123,39 @@ async function appendPatientHistory(patientUuid, data) {
       timestamp: Date.now()
     })
   });
+}
+
+function estimateWaitMinutes(category, numberRank) {
+  const categoryValue = Number.isInteger(category) ? category : 5;
+  const rankValue = Number.isInteger(numberRank) && numberRank > 0 ? numberRank : 1;
+  const baseByCategory = {
+    1: 2,
+    2: 6,
+    3: 12,
+    4: 20,
+    5: 30
+  };
+  const perRankByCategory = {
+    1: 3,
+    2: 4,
+    3: 5,
+    4: 6,
+    5: 7
+  };
+  const base = baseByCategory[categoryValue] ?? baseByCategory[5];
+  const perRank = perRankByCategory[categoryValue] ?? perRankByCategory[5];
+  return base + (rankValue - 1) * perRank;
+}
+
+async function fetchEstimatedWaitForPatient(patientUuid) {
+  const queuePayload = await requestJson(`${apiBaseUrl}/api/nurses/queue`);
+  const queueRows = Array.isArray(queuePayload?.patients) ? queuePayload.patients : [];
+  const queueRow = queueRows.find((row) => row?.uuid === patientUuid);
+  if (!queueRow) {
+    return "Unavailable";
+  }
+  const minutes = estimateWaitMinutes(queueRow.category, queueRow.number_rank);
+  return `${minutes} min`;
 }
 
 function buildClinicalSummary(form) {
@@ -167,6 +200,19 @@ function summarizeMedia(files) {
   return `${files.length} file${files.length === 1 ? "" : "s"} attached`;
 }
 
+async function mediaFilesToPayload(files) {
+  const items = [];
+  for (const file of files) {
+    const contentBase64 = await fileToBase64(file);
+    items.push({
+      contentBase64,
+      mimeType: file.type,
+      text: `Patient uploaded ${file.name}`
+    });
+  }
+  return items;
+}
+
 export default function App() {
   const [form, setForm] = useState(initialForm);
   const [mediaFiles, setMediaFiles] = useState([]);
@@ -174,6 +220,7 @@ export default function App() {
   const [mode, setMode] = useState("new");
   const [status, setStatus] = useState("idle");
   const [message, setMessage] = useState("");
+  const [estimatedWaitTime, setEstimatedWaitTime] = useState("");
   const [isListening, setIsListening] = useState(false);
   const [debugLogs, setDebugLogs] = useState(() => [
     buildLogEntry("Patient UI loaded", {
@@ -316,16 +363,25 @@ export default function App() {
       let activePatientUuid = patientUuid;
 
       if (!activePatientUuid) {
+        const createMedia = await mediaFilesToPayload(mediaFiles);
+        const createPayload = {
+          firstName: form.firstName.trim(),
+          lastName: form.lastName.trim(),
+          birthday: form.birthday,
+          incident: form.reason,
+          notes: form.updateNote || form.reason,
+          data: buildClinicalSummary(form),
+          media: createMedia
+        };
+
         addDebugLog("Creating patient row", {
           firstName: form.firstName.trim(),
           lastName: form.lastName.trim(),
-          birthday: form.birthday
+          birthday: form.birthday,
+          hasIncident: Boolean(createPayload.incident),
+          mediaCount: createMedia.length
         });
-        const created = await createPatientEntry({
-          firstName: form.firstName.trim(),
-          lastName: form.lastName.trim(),
-          birthday: form.birthday
-        });
+        const created = await createPatientEntry(createPayload);
         activePatientUuid = created.patientUuid;
         setPatientUuid(activePatientUuid);
         setMode("update");
@@ -334,15 +390,17 @@ export default function App() {
         });
       }
 
-      addDebugLog("Appending patient JSON", {
-        patientUuid: activePatientUuid,
-        payloadType: isExistingPatient ? "patient_update" : "patient_intake"
-      });
-      await appendPatientHistory(
-        activePatientUuid,
-        isExistingPatient ? buildUpdateSummary(form) : buildClinicalSummary(form)
-      );
-      await submitMedia(activePatientUuid);
+      if (isExistingPatient) {
+        addDebugLog("Appending patient update JSON", {
+          patientUuid: activePatientUuid,
+          payloadType: "patient_update"
+        });
+        await appendPatientHistory(activePatientUuid, buildUpdateSummary(form));
+        await submitMedia(activePatientUuid);
+      }
+
+      const estimatedWait = await fetchEstimatedWaitForPatient(activePatientUuid).catch(() => "Unavailable");
+      setEstimatedWaitTime(estimatedWait);
 
       setStatus("submitted");
       addDebugLog("Submit finished", {
@@ -369,6 +427,7 @@ export default function App() {
   function handleSubmitAnotherUpdate() {
     setStatus("idle");
     setMode("update");
+    setEstimatedWaitTime("");
     setForm((current) => ({
       ...current,
       reason: "",
@@ -398,6 +457,7 @@ export default function App() {
           <div className="submitted-panel">
             <h2>Thank you.</h2>
             <p>Your care team will see this in the queue.</p>
+            <p>Estimated wait time: {estimatedWaitTime || "Unavailable"}</p>
             <button type="button" className="link-button" onClick={handleSubmitAnotherUpdate}>
               Submit an update to your condition
             </button>

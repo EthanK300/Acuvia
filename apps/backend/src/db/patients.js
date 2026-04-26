@@ -11,6 +11,17 @@ export async function getPatientBySessionUuid(patientUuid) {
   return result.rows[0] || null;
 }
 
+export async function getPatientDetails(patientUuid) {
+  const result = await pool.query(
+    `select uuid, first_name, last_name, birthday, category, description, session_start, session_expires_at
+     from patients
+     where uuid = $1`,
+    [patientUuid]
+  );
+
+  return result.rows[0] || null;
+}
+
 export async function getPatientForRanking(patientUuid) {
   const result = await pool.query(
     `select
@@ -90,6 +101,31 @@ export async function insertPatientData({ patientUuid, payload }) {
   );
 
   return result.rows[0];
+}
+
+export async function listPatientDataHistory(patientUuid) {
+  const result = await pool.query(
+    `select payload, updated_at
+     from patient_data
+     where patient_uuid = $1
+     order by updated_at asc`,
+    [patientUuid]
+  );
+
+  return result.rows;
+}
+
+export async function updatePatientTriage({ patientUuid, category, description }) {
+  const result = await pool.query(
+    `update patients
+     set category = $1,
+         description = $2
+     where uuid = $3
+     returning uuid, category, description`,
+    [category, description, patientUuid]
+  );
+
+  return result.rows[0] || null;
 }
 
 export async function clearPatientRecords(patientUuid) {

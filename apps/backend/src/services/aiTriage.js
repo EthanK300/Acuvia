@@ -198,3 +198,62 @@ export async function compareCasesForRanking(targetCase, referenceCase) {
   });
   return normalized;
 }
+
+function compactCaseForRanking(caseItem) {
+  return {
+    id: caseItem.uuid,
+    description: String(caseItem.description || "").slice(0, 280),
+    latestText: String(caseItem.latest_payload?.text || "").slice(0, 280),
+    waitMinutes: waitMinutesFromTimestamp(caseItem.created_at)
+  };
+}
+
+function normalizeInsertionOutput(output, candidateCount) {
+  if (!output || typeof output !== "object") {
+    throw new Error("AI insertion output must be an object");
+  }
+
+  const insertIndex = Number(output.insertIndex);
+  if (!Number.isInteger(insertIndex)) {
+    throw new Error("AI insertion insertIndex must be an integer");
+  }
+
+  const clampedIndex = Math.max(0, Math.min(candidateCount, insertIndex));
+  return {
+    insertIndex: clampedIndex,
+    rationale: String(output.rationale || "").trim()
+  };
+}
+
+export async function chooseInsertionIndexForCategory(targetCase, categoryCases) {
+  const candidates = Array.isArray(categoryCases) ? categoryCases : [];
+  console.log("[ai-triage] category insertion request", {
+    category: targetCase?.category,
+    candidateCount: candidates.length
+  });
+
+  const model = getGeminiModel();
+  const prompt = [
+    "You are an emergency triage ranking assistant.",
+    "All cases are in the same ESI category.",
+    "Return JSON only with keys: insertIndex, rationale.",
+    "insertIndex must be an integer from 0 to N, where N is the number of existing cases.",
+    "insertIndex means where TARGET should be inserted into EXISTING_ORDER (0 is front/highest priority).",
+    "Prioritize higher severity details first; use wait time as tie-breaker.",
+    "EXISTING_ORDER is currently sorted highest-priority first.",
+    `N=${candidates.length}`,
+    "TARGET:",
+    JSON.stringify(compactCaseForRanking(targetCase)),
+    "EXISTING_ORDER:",
+    JSON.stringify(candidates.map(compactCaseForRanking))
+  ].join("\n");
+
+  const result = await model.generateContent(prompt);
+  const raw = result.response.text();
+  const parsed = parseJsonFromModelText(raw);
+  const normalized = normalizeInsertionOutput(parsed, candidates.length);
+  console.log("[ai-triage] category insertion response", {
+    insertIndex: normalized.insertIndex
+  });
+  return normalized;
+}

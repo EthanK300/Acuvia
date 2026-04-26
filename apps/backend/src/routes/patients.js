@@ -1,8 +1,11 @@
 import { Router } from "express";
 import {
   createPatientWithSession,
+  getPatientDetails,
   getPatientBySessionUuid,
-  insertPatientData
+  insertPatientData,
+  listPatientDataHistory,
+  updatePatientTriage
 } from "../db/patients.js";
 import {
   buildSessionWindow,
@@ -11,7 +14,7 @@ import {
   readCookieValue
 } from "../services/session.js";
 import { classifyPatientIntake } from "../services/aiTriage.js";
-import { calculateInitialRankForCase } from "../services/rankingQueue.js";
+import { enqueueRankingEvent } from "../services/rankingQueue.js";
 import { uploadPatientMedia } from "../services/patientStorage.js";
 
 export const patientsRouter = Router();
@@ -39,6 +42,27 @@ function normalizeMediaItems(input) {
     return [input];
   }
   return [];
+}
+
+function collectStringsFromValue(value, collector) {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.length > 0) {
+      collector.push(trimmed);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectStringsFromValue(item, collector);
+    }
+    return;
+  }
+  if (value && typeof value === "object") {
+    for (const item of Object.values(value)) {
+      collectStringsFromValue(item, collector);
+    }
+  }
 }
 
 function buildPatientWebsocketUrl(req, patientUuid) {
@@ -144,25 +168,9 @@ patientsRouter.post("/", async (req, res) => {
       category: intakeClassification.category,
       hasDescription: Boolean(intakeClassification.description)
     });
-    console.log("[patients] create ai-ranking:start");
-    const initialRank = await calculateInitialRankForCase({
-      category: intakeClassification.category,
-      description: intakeClassification.description,
-      created_at: startedAt,
-      latest_payload: {
-        text: intakeText,
-        form: rawBody?.data || null
-      }
-    }, {
-      requireAiComparison: true
-    });
-    console.log("[patients] create ai-ranking:result", {
-      category: intakeClassification.category,
-      numberRank: initialRank
-    });
     const patient = await createPatientWithSession({
       category: intakeClassification.category,
-      numberRank: initialRank,
+      numberRank: null,
       firstName,
       lastName,
       birthday,
@@ -224,6 +232,11 @@ patientsRouter.post("/", async (req, res) => {
       patientUuid: patient.uuid,
       dataId: createdData.id
     });
+    enqueueRankingEvent(patient.uuid, "create");
+    console.log("[patients] create ranking:event-enqueued", {
+      patientUuid: patient.uuid,
+      reason: "create"
+    });
     console.log("[patients] create success", {
       patientUuid: patient.uuid,
       category: patient.category,
@@ -280,8 +293,8 @@ patientsRouter.patch("/:patientUuid", async (req, res) => {
       });
     }
 
-    const patient = await getPatientBySessionUuid(sessionUuid);
-    if (!patient || !hasActiveSession(patient.session_expires_at)) {
+    const patientSession = await getPatientBySessionUuid(sessionUuid);
+    if (!patientSession || !hasActiveSession(patientSession.session_expires_at)) {
       res.clearCookie(PATIENT_SESSION_COOKIE);
       return res.status(401).json({
         ok: false,
@@ -342,6 +355,35 @@ patientsRouter.patch("/:patientUuid", async (req, res) => {
       patientUuid,
       payload
     });
+
+    const patient = await getPatientDetails(patientUuid);
+    const history = await listPatientDataHistory(patientUuid);
+    const historyStrings = [];
+    for (const row of history) {
+      collectStringsFromValue(row.payload, historyStrings);
+    }
+
+    const recategorized = await classifyPatientIntake({
+      firstName: patient?.first_name || "Unknown",
+      lastName: patient?.last_name || "Unknown",
+      birthday: patient?.birthday || "Unknown",
+      incident:
+        historyStrings.join(" | ") ||
+        patient?.description ||
+        "No incident details provided."
+    });
+
+    const triage = await updatePatientTriage({
+      patientUuid,
+      category: recategorized.category,
+      description: recategorized.description
+    });
+    console.log("[patients] update recategorized", {
+      patientUuid,
+      previousCategory: patient?.category,
+      nextCategory: triage?.category
+    });
+
     enqueueRankingEvent(patientUuid, "update");
     console.log("[patients] update ranking:event-enqueued", {
       patientUuid,
