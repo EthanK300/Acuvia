@@ -3,11 +3,13 @@ import Constants from "expo-constants";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
+  Modal,
   Pressable,
   SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View
 } from "react-native";
 
@@ -51,6 +53,7 @@ const backendUrl =
     ? configuredBackendUrl
     : detectedBackendUrl;
 const DEBUG_PREFIX = "[nurse-ui]";
+const SEVERITY_FILTER_OPTIONS = ["All", "ESI 1", "ESI 2", "ESI 3", "ESI 4", "ESI 5"];
 
 function categoryToSeverity(category) {
   if (category === 1) return "ESI 1";
@@ -106,6 +109,29 @@ function formatElapsedSince(timestamp) {
   const hours = Math.floor(minutes / 60);
   const remainder = minutes % 60;
   return remainder ? `${hours}h ${remainder}m ago` : `${hours}h ago`;
+}
+
+function calculateWaitMinutes(timestamp) {
+  if (!timestamp) {
+    return null;
+  }
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  return Math.max(0, Math.floor((Date.now() - date.getTime()) / 60000));
+}
+
+function formatAverageWait(minutes) {
+  if (minutes == null) {
+    return "--";
+  }
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
 }
 
 function formatBirthday(value) {
@@ -220,13 +246,34 @@ function SeverityBadge({ category, compact = false }) {
   );
 }
 
-function FilterPill({ label, icon }) {
+function MagnifierIcon() {
   return (
-    <View style={styles.filterPill}>
-      {icon ? <Text style={styles.filterIcon}>{icon}</Text> : null}
-      <Text style={styles.filterText}>{label}</Text>
-      {!icon ? <Text style={styles.filterChevron}>v</Text> : null}
+    <View style={styles.magnifierIcon}>
+      <View style={styles.magnifierCircle} />
+      <View style={styles.magnifierHandle} />
     </View>
+  );
+}
+
+function FilterPill({ label, active, onPress }) {
+  return (
+    <Pressable accessibilityRole="button" onPress={onPress} style={[styles.filterPill, active && styles.filterPillActive]}>
+      <Text style={styles.filterText}>{label}</Text>
+      <View style={styles.filterChevronIcon} />
+    </Pressable>
+  );
+}
+
+function SearchButton({ active, onPress }) {
+  return (
+    <Pressable
+      accessibilityLabel="Search patients"
+      accessibilityRole="button"
+      onPress={onPress}
+      style={[styles.searchButton, active && styles.searchButtonActive]}
+    >
+      <MagnifierIcon />
+    </Pressable>
   );
 }
 
@@ -338,14 +385,59 @@ function UpdateCard({ patient }) {
   );
 }
 
+function FilterDropdown({ title, options, selectedValue, visible, onClose, onSelect }) {
+  return (
+    <Modal animationType="fade" onRequestClose={onClose} transparent visible={visible}>
+      <Pressable style={styles.dropdownBackdrop} onPress={onClose}>
+        <Pressable style={styles.dropdownCard}>
+          <View style={styles.dropdownHeader}>
+            <Text style={styles.dropdownTitle}>{title}</Text>
+            <Pressable accessibilityRole="button" onPress={onClose} style={styles.dropdownCloseButton}>
+              <Text style={styles.dropdownCloseText}>Close</Text>
+            </Pressable>
+          </View>
+          <ScrollView contentContainerStyle={styles.dropdownOptions}>
+            {options.map((option) => {
+              const isSelected = option === selectedValue;
+              return (
+                <Pressable
+                  accessibilityRole="button"
+                  key={option}
+                  onPress={() => {
+                    onSelect(option);
+                    onClose();
+                  }}
+                  style={[styles.dropdownOption, isSelected && styles.dropdownOptionSelected]}
+                >
+                  <Text style={[styles.dropdownOptionText, isSelected && styles.dropdownOptionTextSelected]}>
+                    {option === "All" ? `All ${title.toLowerCase()}` : option}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
 export default function App() {
   const [patients, setPatients] = useState([]);
   const [selectedPatientId, setSelectedPatientId] = useState("");
+  const [isPatientModalVisible, setIsPatientModalVisible] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [queueError, setQueueError] = useState("");
+  const [isSearchVisible, setIsSearchVisible] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [severityFilter, setSeverityFilter] = useState("All");
+  const [injuryFilter, setInjuryFilter] = useState("All");
+  const [activeDropdown, setActiveDropdown] = useState(null);
 
-  const loadPatients = useCallback(async () => {
-    setIsRefreshing(true);
+  const loadPatients = useCallback(async ({ showLoading = false } = {}) => {
+    if (showLoading) {
+      setIsRefreshing(true);
+    }
     try {
       const queueRows = await fetchPatients();
       const mappedPatients = queueRows.map(mapQueuePatient);
@@ -355,27 +447,75 @@ export default function App() {
         if (currentId && mappedPatients.some((patient) => patient.id === currentId)) {
           return currentId;
         }
-        return mappedPatients[0]?.id || "";
+        setIsPatientModalVisible(false);
+        return "";
       });
     } catch (error) {
       setQueueError(error.message || "Failed to load queue");
     } finally {
-      setIsRefreshing(false);
+      if (showLoading) {
+        setIsRefreshing(false);
+      }
     }
   }, []);
 
   useEffect(() => {
-    loadPatients();
-    const intervalId = setInterval(loadPatients, 5000);
+    loadPatients({ showLoading: true });
+    const intervalId = setInterval(() => {
+      loadPatients({ showLoading: false });
+    }, 5000);
     return () => clearInterval(intervalId);
   }, [loadPatients]);
 
   const selectedPatient = useMemo(() => {
-    return patients.find((patient) => patient.id === selectedPatientId) || patients[0] || null;
+    return patients.find((patient) => patient.id === selectedPatientId) || null;
   }, [patients, selectedPatientId]);
 
   const criticalCount = patients.filter((patient) => patient.category === 1).length;
-  const updates = patients.filter((patient) => patient.hasUpdate).slice(0, 6);
+  const averageWaitMinutes = useMemo(() => {
+    const waits = patients
+      .map((patient) => calculateWaitMinutes(patient.createdAt))
+      .filter((minutes) => Number.isFinite(minutes));
+    if (waits.length === 0) {
+      return null;
+    }
+    return Math.round(waits.reduce((total, minutes) => total + minutes, 0) / waits.length);
+  }, [patients]);
+  const injuryFilterOptions = useMemo(() => {
+    return ["All", ...Array.from(new Set(patients.map((patient) => patient.injuryTag))).sort()];
+  }, [patients]);
+
+  useEffect(() => {
+    if (!injuryFilterOptions.includes(injuryFilter)) {
+      setInjuryFilter("All");
+    }
+  }, [injuryFilter, injuryFilterOptions]);
+
+  const filteredPatients = useMemo(() => {
+    const normalizedQuery = searchQuery.trim().toLowerCase();
+    return patients.filter((patient) => {
+      const matchesSearch =
+        !normalizedQuery ||
+        patient.name.toLowerCase().includes(normalizedQuery) ||
+        patient.description.toLowerCase().includes(normalizedQuery) ||
+        patient.injuryTag.toLowerCase().includes(normalizedQuery);
+      const matchesSeverity =
+        severityFilter === "All" || categoryToSeverity(patient.category) === severityFilter;
+      const matchesInjury = injuryFilter === "All" || patient.injuryTag === injuryFilter;
+      return matchesSearch && matchesSeverity && matchesInjury;
+    });
+  }, [injuryFilter, patients, searchQuery, severityFilter]);
+  const updates = filteredPatients.filter((patient) => patient.hasUpdate).slice(0, 6);
+
+  function toggleSearch() {
+    setIsSearchVisible((isVisible) => {
+      const nextValue = !isVisible;
+      if (!nextValue) {
+        setSearchQuery("");
+      }
+      return nextValue;
+    });
+  }
 
   return (
     <SafeAreaView style={styles.screen}>
@@ -387,7 +527,11 @@ export default function App() {
             <Text style={styles.brandText}>ACUVIA</Text>
             <Text style={styles.roleText}>NURSE</Text>
           </View>
-          <Pressable accessibilityRole="button" onPress={loadPatients} style={styles.avatarButton}>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => loadPatients({ showLoading: true })}
+            style={styles.avatarButton}
+          >
             {isRefreshing ? <ActivityIndicator color="#ffffff" size="small" /> : <Text style={styles.avatarText}>RC</Text>}
           </Pressable>
         </View>
@@ -402,8 +546,8 @@ export default function App() {
             <Text style={styles.statLabel}>CRITICAL</Text>
           </View>
           <View style={styles.statCard}>
-            <Text style={styles.statValue}>{isRefreshing ? "..." : "LIVE"}</Text>
-            <Text style={styles.statLabel}>QUEUE</Text>
+            <Text style={styles.statValue}>{isRefreshing ? "..." : formatAverageWait(averageWaitMinutes)}</Text>
+            <Text style={styles.statLabel}>AVG WAIT</Text>
           </View>
         </View>
 
@@ -413,27 +557,62 @@ export default function App() {
           </View>
         ) : null}
 
-        <PatientDetail patient={selectedPatient} />
+        {isSearchVisible ? (
+          <View style={styles.searchPanel}>
+            <MagnifierIcon />
+            <TextInput
+              autoCapitalize="words"
+              autoCorrect={false}
+              onChangeText={setSearchQuery}
+              placeholder="Search patient name, injury, or note"
+              placeholderTextColor="#8a8a8a"
+              style={styles.searchInput}
+              value={searchQuery}
+            />
+            {searchQuery ? (
+              <Pressable accessibilityRole="button" onPress={() => setSearchQuery("")} style={styles.clearSearchButton}>
+                <Text style={styles.clearSearchText}>Clear</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
 
         <View style={styles.columns}>
           <View style={styles.column}>
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionTitle}>PRIORITY QUEUE</Text>
               <View style={styles.filters}>
-                <FilterPill icon="S" label="" />
-                <FilterPill label="Severity" />
-                <FilterPill label="Injury Type" />
+                <SearchButton active={isSearchVisible} onPress={toggleSearch} />
+                <FilterPill
+                  active={severityFilter !== "All"}
+                  label={severityFilter === "All" ? "Severity" : severityFilter}
+                  onPress={() => setActiveDropdown("severity")}
+                />
+                <FilterPill
+                  active={injuryFilter !== "All"}
+                  label={injuryFilter === "All" ? "Injury Type" : injuryFilter}
+                  onPress={() => setActiveDropdown("injury")}
+                />
               </View>
             </View>
             <View style={styles.cardStack}>
-              {patients.map((patient) => (
+              {filteredPatients.map((patient) => (
                 <QueueCard
                   key={patient.id}
                   patient={patient}
-                  selected={patient.id === selectedPatient?.id}
-                  onPress={(nextPatient) => setSelectedPatientId(nextPatient.id)}
+                  selected={patient.id === selectedPatientId}
+                  onPress={(nextPatient) => {
+                    setSelectedPatientId(nextPatient.id);
+                    setIsPatientModalVisible(true);
+                  }}
                 />
               ))}
+              {filteredPatients.length === 0 ? (
+                <View style={styles.emptyQueueCard}>
+                  <Text style={styles.emptyQueueTitle}>No matching patients</Text>
+                  <Text style={styles.emptyQueueText}>Adjust search, severity, or injury type.</Text>
+                </View>
+              ) : null}
             </View>
           </View>
 
@@ -443,19 +622,75 @@ export default function App() {
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionTitle}>PATIENT UPDATES</Text>
               <View style={styles.filters}>
-                <FilterPill icon="S" label="" />
-                <FilterPill label="Severity" />
-                <FilterPill label="Injury Type" />
+                <SearchButton active={isSearchVisible} onPress={toggleSearch} />
+                <FilterPill
+                  active={severityFilter !== "All"}
+                  label={severityFilter === "All" ? "Severity" : severityFilter}
+                  onPress={() => setActiveDropdown("severity")}
+                />
+                <FilterPill
+                  active={injuryFilter !== "All"}
+                  label={injuryFilter === "All" ? "Injury Type" : injuryFilter}
+                  onPress={() => setActiveDropdown("injury")}
+                />
               </View>
             </View>
             <View style={styles.cardStack}>
-              {(updates.length ? updates : patients.slice(0, 3)).map((patient) => (
+              {(updates.length ? updates : filteredPatients.slice(0, 3)).map((patient) => (
                 <UpdateCard key={patient.id} patient={patient} />
               ))}
+              {filteredPatients.length === 0 ? (
+                <View style={styles.emptyQueueCard}>
+                  <Text style={styles.emptyQueueTitle}>No matching updates</Text>
+                  <Text style={styles.emptyQueueText}>Filters apply to patient updates too.</Text>
+                </View>
+              ) : null}
             </View>
           </View>
         </View>
       </ScrollView>
+
+      <Modal
+        animationType="fade"
+        onRequestClose={() => setIsPatientModalVisible(false)}
+        transparent
+        visible={isPatientModalVisible && Boolean(selectedPatient)}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={() => setIsPatientModalVisible(false)}>
+          <Pressable style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Patient Details</Text>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => setIsPatientModalVisible(false)}
+                style={styles.modalCloseButton}
+              >
+                <Text style={styles.modalCloseText}>Close</Text>
+              </Pressable>
+            </View>
+            <ScrollView>
+              <PatientDetail patient={selectedPatient} />
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <FilterDropdown
+        onClose={() => setActiveDropdown(null)}
+        onSelect={setSeverityFilter}
+        options={SEVERITY_FILTER_OPTIONS}
+        selectedValue={severityFilter}
+        title="Severity"
+        visible={activeDropdown === "severity"}
+      />
+      <FilterDropdown
+        onClose={() => setActiveDropdown(null)}
+        onSelect={setInjuryFilter}
+        options={injuryFilterOptions}
+        selectedValue={injuryFilter}
+        title="Injury Type"
+        visible={activeDropdown === "injury"}
+      />
     </SafeAreaView>
   );
 }
@@ -476,9 +711,9 @@ const styles = StyleSheet.create({
     backgroundColor: "#f8f8f8"
   },
   page: {
-    gap: 14,
+    gap: 16,
     minHeight: "100%",
-    padding: 28
+    padding: 24
   },
   header: {
     alignItems: "center",
@@ -595,7 +830,7 @@ const styles = StyleSheet.create({
   roleText: {
     color: "#5a5a5a",
     fontFamily,
-    fontSize: 14,
+    fontSize: 18,
     fontWeight: "800",
     marginLeft: 4,
     marginTop: 12
@@ -611,7 +846,7 @@ const styles = StyleSheet.create({
   avatarText: {
     color: "#ffffff",
     fontFamily,
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: "600"
   },
   statsRow: {
@@ -624,23 +859,23 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     borderWidth: 1,
     flex: 1,
-    minHeight: 48,
-    paddingHorizontal: 14,
-    paddingVertical: 9
+    minHeight: 60,
+    paddingHorizontal: 16,
+    paddingVertical: 12
   },
   statValue: {
     color: "#000000",
     fontFamily,
-    fontSize: 20,
+    fontSize: 26,
     fontWeight: "800",
-    lineHeight: 22
+    lineHeight: 28
   },
   statLabel: {
     color: "#5a5a5a",
     fontFamily,
-    fontSize: 10,
+    fontSize: 13,
     fontWeight: "800",
-    lineHeight: 12
+    lineHeight: 15
   },
   errorPanel: {
     backgroundColor: "#ffe1df",
@@ -653,7 +888,7 @@ const styles = StyleSheet.create({
   errorText: {
     color: "#9d241b",
     fontFamily,
-    fontSize: 12,
+    fontSize: 15,
     fontWeight: "700"
   },
   detailPanel: {
@@ -693,22 +928,22 @@ const styles = StyleSheet.create({
   detailName: {
     color: "#151515",
     fontFamily,
-    fontSize: 32,
+    fontSize: 36,
     fontWeight: "800",
     letterSpacing: 0,
-    lineHeight: 36
+    lineHeight: 40
   },
   detailMetaLabel: {
     color: "#8a8a8a",
     fontFamily,
-    fontSize: 10,
-    lineHeight: 12
+    fontSize: 13,
+    lineHeight: 15
   },
   detailMetaValue: {
     color: "#8a8a8a",
     fontFamily,
-    fontSize: 10,
-    lineHeight: 12
+    fontSize: 13,
+    lineHeight: 15
   },
   severityBadge: {
     alignItems: "center",
@@ -725,13 +960,13 @@ const styles = StyleSheet.create({
   },
   severityText: {
     fontFamily,
-    fontSize: 13,
+    fontSize: 16,
     fontWeight: "800",
-    lineHeight: 15
+    lineHeight: 18
   },
   severityTextCompact: {
-    fontSize: 10,
-    lineHeight: 12
+    fontSize: 13,
+    lineHeight: 15
   },
   intakeGrid: {
     columnGap: 28,
@@ -749,15 +984,15 @@ const styles = StyleSheet.create({
   intakeLabel: {
     color: "#000000",
     fontFamily,
-    fontSize: 14,
+    fontSize: 17,
     fontWeight: "800",
-    lineHeight: 17
+    lineHeight: 20
   },
   intakeValue: {
     color: "#151515",
     fontFamily,
-    fontSize: 12,
-    lineHeight: 15,
+    fontSize: 15,
+    lineHeight: 19,
     marginTop: 2
   },
   columns: {
@@ -780,13 +1015,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     flexDirection: "row",
     justifyContent: "space-between",
-    minHeight: 38,
+    minHeight: 48,
     paddingHorizontal: 20
   },
   sectionTitle: {
     color: "#000000",
     fontFamily,
-    fontSize: 14,
+    fontSize: 18,
     fontWeight: "900",
     letterSpacing: 0
   },
@@ -795,6 +1030,79 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 6
   },
+  searchButton: {
+    alignItems: "center",
+    backgroundColor: "#ffffff",
+    borderColor: "#e7e7e7",
+    borderRadius: 4,
+    borderWidth: 1,
+    height: 28,
+    justifyContent: "center",
+    width: 32
+  },
+  searchButtonActive: {
+    borderColor: "#0045d0"
+  },
+  magnifierIcon: {
+    height: 16,
+    position: "relative",
+    width: 16
+  },
+  magnifierCircle: {
+    borderColor: "#5a5a5a",
+    borderRadius: 6,
+    borderWidth: 2,
+    height: 11,
+    left: 1,
+    position: "absolute",
+    top: 1,
+    width: 11
+  },
+  magnifierHandle: {
+    backgroundColor: "#5a5a5a",
+    borderRadius: 2,
+    height: 7,
+    position: "absolute",
+    right: 1,
+    top: 10,
+    transform: [{ rotate: "-45deg" }],
+    width: 2
+  },
+  searchPanel: {
+    alignItems: "center",
+    backgroundColor: "#ffffff",
+    borderColor: "#e7e7e7",
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 10,
+    minHeight: 48,
+    paddingHorizontal: 14
+  },
+  searchInput: {
+    color: "#151515",
+    flex: 1,
+    fontFamily,
+    fontSize: 17,
+    fontWeight: "500",
+    minHeight: 44
+  },
+  clearSearchButton: {
+    alignItems: "center",
+    backgroundColor: "rgba(138, 138, 138, 0.14)",
+    borderColor: "rgba(138, 138, 138, 0.35)",
+    borderRadius: 6,
+    borderWidth: 1,
+    minHeight: 30,
+    justifyContent: "center",
+    paddingHorizontal: 12
+  },
+  clearSearchText: {
+    color: "#5a5a5a",
+    fontFamily,
+    fontSize: 13,
+    fontWeight: "800"
+  },
   filterPill: {
     alignItems: "center",
     backgroundColor: "#ffffff",
@@ -802,38 +1110,62 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     borderWidth: 1,
     flexDirection: "row",
-    height: 22,
+    height: 28,
     justifyContent: "center",
     minWidth: 23,
     paddingHorizontal: 8
   },
-  filterIcon: {
-    color: "#5a5a5a",
-    fontFamily,
-    fontSize: 11
+  filterPillActive: {
+    borderColor: "#0045d0"
   },
   filterText: {
     color: "#5a5a5a",
     fontFamily,
-    fontSize: 10,
-    lineHeight: 12
+    fontSize: 12,
+    lineHeight: 14
   },
-  filterChevron: {
-    color: "#5a5a5a",
-    fontFamily,
-    fontSize: 10,
-    marginLeft: 6
+  filterChevronIcon: {
+    borderBottomColor: "#5a5a5a",
+    borderBottomWidth: 2,
+    borderRightColor: "#5a5a5a",
+    borderRightWidth: 2,
+    height: 7,
+    marginLeft: 8,
+    marginTop: -3,
+    transform: [{ rotate: "45deg" }],
+    width: 7
   },
   cardStack: {
-    gap: 5,
-    marginTop: 5
+    gap: 8,
+    marginTop: 8
+  },
+  emptyQueueCard: {
+    backgroundColor: "#ffffff",
+    borderColor: "#e7e7e7",
+    borderRadius: 8,
+    borderWidth: 1,
+    gap: 4,
+    paddingHorizontal: 20,
+    paddingVertical: 18
+  },
+  emptyQueueTitle: {
+    color: "#151515",
+    fontFamily,
+    fontSize: 18,
+    fontWeight: "800"
+  },
+  emptyQueueText: {
+    color: "#5a5a5a",
+    fontFamily,
+    fontSize: 14,
+    fontWeight: "500"
   },
   queueCard: {
     backgroundColor: "#ffffff",
     borderColor: "#e7e7e7",
     borderRadius: 8,
     borderWidth: 1,
-    minHeight: 104,
+    minHeight: 126,
     paddingHorizontal: 20,
     paddingVertical: 16
   },
@@ -854,16 +1186,16 @@ const styles = StyleSheet.create({
   rankText: {
     color: "#5a5a5a",
     fontFamily,
-    fontSize: 10,
+    fontSize: 13,
     fontWeight: "600"
   },
   queueName: {
     color: "#151515",
     flexShrink: 1,
     fontFamily,
-    fontSize: 18,
+    fontSize: 23,
     fontWeight: "700",
-    lineHeight: 22
+    lineHeight: 27
   },
   alertDot: {
     backgroundColor: "#ed522c",
@@ -880,15 +1212,15 @@ const styles = StyleSheet.create({
   injuryPillText: {
     color: "#5a5a5a",
     fontFamily,
-    fontSize: 10,
+    fontSize: 12,
     fontWeight: "600",
-    lineHeight: 13
+    lineHeight: 15
   },
   queueDescription: {
     color: "#151515",
     fontFamily,
-    fontSize: 12,
-    lineHeight: 16,
+    fontSize: 16,
+    lineHeight: 21,
     marginTop: 8
   },
   queueFooter: {
@@ -900,8 +1232,8 @@ const styles = StyleSheet.create({
   timeText: {
     color: "#8a8a8a",
     fontFamily,
-    fontSize: 10,
-    lineHeight: 14
+    fontSize: 13,
+    lineHeight: 16
   },
   attendButton: {
     alignItems: "center",
@@ -909,14 +1241,14 @@ const styles = StyleSheet.create({
     borderColor: "rgba(138, 138, 138, 0.5)",
     borderRadius: 4,
     borderWidth: 1,
-    height: 20,
+    height: 28,
     justifyContent: "center",
     paddingHorizontal: 10
   },
   attendButtonText: {
     color: "#8a8a8a",
     fontFamily,
-    fontSize: 10,
+    fontSize: 12,
     fontWeight: "600"
   },
   updateCard: {
@@ -924,7 +1256,7 @@ const styles = StyleSheet.create({
     borderColor: "#e7e7e7",
     borderRadius: 8,
     borderWidth: 1,
-    minHeight: 104,
+    minHeight: 126,
     paddingHorizontal: 22,
     paddingVertical: 16
   },
@@ -936,9 +1268,9 @@ const styles = StyleSheet.create({
   updateName: {
     color: "#151515",
     fontFamily,
-    fontSize: 18,
+    fontSize: 23,
     fontWeight: "600",
-    lineHeight: 22
+    lineHeight: 27
   },
   updateFooter: {
     alignItems: "center",
@@ -955,9 +1287,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     borderRadius: 4,
     borderWidth: 1,
-    height: 18,
+    height: 26,
     justifyContent: "center",
-    width: 36
+    width: 44
   },
   acceptButton: {
     backgroundColor: "rgba(137, 183, 72, 0.2)",
@@ -970,13 +1302,125 @@ const styles = StyleSheet.create({
   acceptText: {
     color: "#52771e",
     fontFamily,
-    fontSize: 13,
+    fontSize: 15,
     fontWeight: "700"
   },
   dismissText: {
     color: "#ed522c",
     fontFamily,
-    fontSize: 13,
+    fontSize: 15,
     fontWeight: "700"
+  },
+  modalBackdrop: {
+    alignItems: "center",
+    backgroundColor: "rgba(0, 0, 0, 0.32)",
+    flex: 1,
+    justifyContent: "center",
+    padding: 28
+  },
+  modalCard: {
+    backgroundColor: "#f8f8f8",
+    borderColor: "#e7e7e7",
+    borderRadius: 10,
+    borderWidth: 1,
+    maxHeight: "88%",
+    maxWidth: 980,
+    padding: 16,
+    width: "92%"
+  },
+  modalHeader: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 12
+  },
+  modalTitle: {
+    color: "#151515",
+    fontFamily,
+    fontSize: 22,
+    fontWeight: "800"
+  },
+  modalCloseButton: {
+    alignItems: "center",
+    backgroundColor: "#0045d0",
+    borderRadius: 8,
+    minHeight: 36,
+    justifyContent: "center",
+    paddingHorizontal: 16
+  },
+  modalCloseText: {
+    color: "#ffffff",
+    fontFamily,
+    fontSize: 15,
+    fontWeight: "800"
+  },
+  dropdownBackdrop: {
+    alignItems: "center",
+    backgroundColor: "rgba(0, 0, 0, 0.16)",
+    flex: 1,
+    justifyContent: "center",
+    padding: 28
+  },
+  dropdownCard: {
+    backgroundColor: "#ffffff",
+    borderColor: "#e7e7e7",
+    borderRadius: 8,
+    borderWidth: 1,
+    maxHeight: "72%",
+    minWidth: 320,
+    padding: 14
+  },
+  dropdownHeader: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 10
+  },
+  dropdownTitle: {
+    color: "#151515",
+    fontFamily,
+    fontSize: 20,
+    fontWeight: "900"
+  },
+  dropdownCloseButton: {
+    alignItems: "center",
+    backgroundColor: "rgba(138, 138, 138, 0.14)",
+    borderColor: "rgba(138, 138, 138, 0.35)",
+    borderRadius: 6,
+    borderWidth: 1,
+    minHeight: 32,
+    justifyContent: "center",
+    paddingHorizontal: 12
+  },
+  dropdownCloseText: {
+    color: "#5a5a5a",
+    fontFamily,
+    fontSize: 13,
+    fontWeight: "800"
+  },
+  dropdownOptions: {
+    gap: 8
+  },
+  dropdownOption: {
+    backgroundColor: "#ffffff",
+    borderColor: "#e7e7e7",
+    borderRadius: 6,
+    borderWidth: 1,
+    minHeight: 42,
+    justifyContent: "center",
+    paddingHorizontal: 12
+  },
+  dropdownOptionSelected: {
+    backgroundColor: "#eef4ff",
+    borderColor: "#0045d0"
+  },
+  dropdownOptionText: {
+    color: "#151515",
+    fontFamily,
+    fontSize: 16,
+    fontWeight: "700"
+  },
+  dropdownOptionTextSelected: {
+    color: "#0045d0"
   }
 });
