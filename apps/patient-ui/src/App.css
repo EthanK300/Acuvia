@@ -389,6 +389,59 @@ textarea {
   display: none;
 }
 
+.debug-panel {
+  background: #ffffff;
+  border: 1px solid #e7e7e7;
+  border-radius: 8px;
+  color: #333333;
+  font-family: "Hanken Grotesk", ui-sans-serif, system-ui, sans-serif;
+  font-size: 12px;
+  line-height: 1.35;
+  margin-top: 16px;
+  padding: 10px 12px;
+}
+
+.debug-panel summary {
+  color: #0045d0;
+  cursor: pointer;
+  font-family: "Mona Sans", ui-sans-serif, system-ui, sans-serif;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.debug-panel p {
+  color: #767676;
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+
+.debug-panel ol {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.debug-panel li {
+  overflow-wrap: anywhere;
+}
+
+.debug-panel strong {
+  color: #0045d0;
+}
+
+.debug-panel pre {
+  background: #f8f8f8;
+  border-radius: 6px;
+  color: #333333;
+  font-size: 11px;
+  margin: 4px 0 0;
+  max-height: 120px;
+  overflow: auto;
+  padding: 6px;
+  white-space: pre-wrap;
+}
+
 @media (min-width: 480px) {
   .patient-page {
     padding-top: 44px;
