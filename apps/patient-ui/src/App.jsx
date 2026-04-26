@@ -220,7 +220,7 @@ export default function App() {
   const [mode, setMode] = useState("new");
   const [status, setStatus] = useState("idle");
   const [message, setMessage] = useState("");
-  const [estimatedWaitTime, setEstimatedWaitTime] = useState("");
+  const [estimatedWaitTime, setEstimatedWaitTime] = useState(null);
   const [isListening, setIsListening] = useState(false);
   const [debugLogs, setDebugLogs] = useState(() => [
     buildLogEntry("Patient UI loaded", {
@@ -264,6 +264,47 @@ export default function App() {
       isMounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (status !== "submitted" || !patientUuid) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    let attempt = 0;
+    const maxAttempts = 8;
+    let timeoutId;
+
+    async function resolveEstimatedWait() {
+      attempt += 1;
+      const estimated = await fetchEstimatedWaitForPatient(patientUuid).catch(() => "Unavailable");
+      if (cancelled) {
+        return;
+      }
+
+      if (estimated && estimated !== "Unavailable") {
+        setEstimatedWaitTime(estimated);
+        return;
+      }
+
+      if (attempt >= maxAttempts) {
+        setEstimatedWaitTime("Unavailable");
+        return;
+      }
+
+      timeoutId = window.setTimeout(resolveEstimatedWait, 1500);
+    }
+
+    setEstimatedWaitTime(null);
+    void resolveEstimatedWait();
+
+    return () => {
+      cancelled = true;
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [status, patientUuid]);
 
   const submitButtonText = useMemo(() => {
     if (status === "submitting") {
@@ -399,9 +440,6 @@ export default function App() {
         await submitMedia(activePatientUuid);
       }
 
-      const estimatedWait = await fetchEstimatedWaitForPatient(activePatientUuid).catch(() => "Unavailable");
-      setEstimatedWaitTime(estimatedWait);
-
       setStatus("submitted");
       addDebugLog("Submit finished", {
         patientUuid: activePatientUuid
@@ -427,7 +465,7 @@ export default function App() {
   function handleSubmitAnotherUpdate() {
     setStatus("idle");
     setMode("update");
-    setEstimatedWaitTime("");
+    setEstimatedWaitTime(null);
     setForm((current) => ({
       ...current,
       reason: "",
@@ -457,7 +495,11 @@ export default function App() {
           <div className="submitted-panel">
             <h2>Thank you.</h2>
             <p>Your care team will see this in the queue.</p>
-            <p>Estimated wait time: {estimatedWaitTime || "Unavailable"}</p>
+            {estimatedWaitTime ? (
+              <p>Estimated wait time: {estimatedWaitTime}</p>
+            ) : (
+              <p>Estimated wait time will appear once your queue ranking updates.</p>
+            )}
             <button type="button" className="link-button" onClick={handleSubmitAnotherUpdate}>
               Submit an update to your condition
             </button>
