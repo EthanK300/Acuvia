@@ -1,4 +1,5 @@
 import { StatusBar } from "expo-status-bar";
+import Constants from "expo-constants";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Pressable,
@@ -9,7 +10,46 @@ import {
   View
 } from "react-native";
 
-const backendUrl = process.env.EXPO_PUBLIC_BACKEND_URL || "http://localhost:4000";
+function getHostFromExpoValue(value) {
+  if (typeof value !== "string" || !value) {
+    return "";
+  }
+
+  const withoutProtocol = value.replace(/^(?:https?|exp):\/\//, "");
+  const withoutPath = withoutProtocol.split("/")[0];
+  const withoutAuth = withoutPath.split("@").pop();
+  return withoutAuth.split(":")[0];
+}
+
+function getExpoHostBackendUrl() {
+  const hostCandidates = [
+    Constants.expoConfig?.hostUri,
+    Constants.manifest?.debuggerHost,
+    Constants.manifest2?.extra?.expoClient?.hostUri,
+    Constants.manifest2?.extra?.expoGo?.debuggerHost
+  ];
+
+  for (const candidate of hostCandidates) {
+    const host = getHostFromExpoValue(candidate);
+    if (host) {
+      return `http://${host}:4000`;
+    }
+  }
+
+  return "http://localhost:4000";
+}
+
+function isLoopbackBackendUrl(value) {
+  return /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::|\/|$)/.test(value || "");
+}
+
+const configuredBackendUrl = process.env.EXPO_PUBLIC_BACKEND_URL;
+const detectedBackendUrl = getExpoHostBackendUrl();
+const backendUrl =
+  configuredBackendUrl && !isLoopbackBackendUrl(configuredBackendUrl)
+    ? configuredBackendUrl
+    : detectedBackendUrl;
+const DEBUG_PREFIX = "[nurse-ui]";
 
 function categoryToSeverity(category) {
   if (category === 1) return "critical";
@@ -18,13 +58,30 @@ function categoryToSeverity(category) {
 }
 
 async function fetchPatients() {
-  const response = await fetch(`${backendUrl}/api/nurses/queue`);
-  if (!response.ok) {
-    throw new Error(`Queue request failed: ${response.status}`);
-  }
+  const url = `${backendUrl}/api/nurses/queue`;
+  console.info(`${DEBUG_PREFIX} queue request:start`, { url });
 
-  const body = await response.json();
-  return Array.isArray(body.patients) ? body.patients : [];
+  try {
+    const response = await fetch(url);
+    const body = await response.json().catch(() => ({}));
+    console.info(`${DEBUG_PREFIX} queue request:finish`, {
+      status: response.status,
+      ok: response.ok,
+      patientCount: Array.isArray(body.patients) ? body.patients.length : 0
+    });
+
+    if (!response.ok || body.ok === false) {
+      throw new Error(body.message || `Queue request failed: ${response.status}`);
+    }
+
+    return Array.isArray(body.patients) ? body.patients : [];
+  } catch (error) {
+    console.error(`${DEBUG_PREFIX} queue request:error`, {
+      url,
+      message: error.message
+    });
+    throw new Error(`${error.message}. Backend: ${backendUrl}`);
+  }
 }
 
 function calculateAgeFromBirthday(birthday) {
