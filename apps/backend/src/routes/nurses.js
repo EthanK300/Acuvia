@@ -2,6 +2,7 @@ import { Router } from "express";
 import { env } from "../config/env.js";
 import {
   clearPatientRecords,
+  getPatientQueueStats,
   getPatientStringSummary,
   listPatientDataHistory,
   listTopPriorityPatients
@@ -14,10 +15,14 @@ export const nursesRouter = Router();
 
 nursesRouter.get("/queue", async (_req, res) => {
   try {
-    const patients = await listTopPriorityPatients(50);
+    const [patients, stats] = await Promise.all([
+      listTopPriorityPatients(50),
+      getPatientQueueStats()
+    ]);
     return res.json({
       ok: true,
-      patients
+      patients,
+      stats
     });
   } catch (error) {
     return res.status(500).json({
@@ -115,10 +120,21 @@ nursesRouter.post("/clear", async (req, res) => {
       });
     }
 
-    const [cleared, media] = await Promise.all([
-      clearPatientRecords(patientUuid),
-      clearPatientMedia(patientUuid)
-    ]);
+    const cleared = await clearPatientRecords(patientUuid);
+    let media = null;
+
+    try {
+      media = await clearPatientMedia(patientUuid);
+    } catch (mediaError) {
+      console.warn("[nurses] clear media cleanup failed", {
+        patientUuid,
+        message: mediaError.message
+      });
+      media = {
+        ok: false,
+        message: mediaError.message
+      };
+    }
 
     return res.json({
       ok: true,

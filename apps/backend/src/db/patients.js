@@ -188,6 +188,23 @@ export async function listTopPriorityPatients(limit = 50) {
   return result.rows;
 }
 
+export async function getPatientQueueStats() {
+  const result = await pool.query(
+    `select
+       count(*)::integer as total_patients,
+       count(*) filter (where category = 1)::integer as critical_patients,
+       round(avg(extract(epoch from (now() - created_at)) / 60))::integer as average_wait_minutes
+     from patients`
+  );
+
+  const row = result.rows[0] || {};
+  return {
+    totalPatients: row.total_patients ?? 0,
+    criticalPatients: row.critical_patients ?? 0,
+    averageWaitMinutes: row.average_wait_minutes ?? null
+  };
+}
+
 export async function listCategoryPatientsForRanking(category) {
   const result = await pool.query(
     `select

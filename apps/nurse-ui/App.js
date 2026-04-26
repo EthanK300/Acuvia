@@ -68,7 +68,7 @@ function getSeverityTone(category) {
   return severityTones[category] || severityTones[5];
 }
 
-async function fetchPatients() {
+async function fetchQueue() {
   const url = `${backendUrl}/api/nurses/queue`;
   console.info(`${DEBUG_PREFIX} queue request:start`, { url });
 
@@ -85,7 +85,10 @@ async function fetchPatients() {
       throw new Error(body.message || `Queue request failed: ${response.status}`);
     }
 
-    return Array.isArray(body.patients) ? body.patients : [];
+    return {
+      patients: Array.isArray(body.patients) ? body.patients : [],
+      stats: body.stats && typeof body.stats === "object" ? body.stats : null
+    };
   } catch (error) {
     console.error(`${DEBUG_PREFIX} queue request:error`, {
       url,
@@ -104,6 +107,45 @@ async function fetchPatientHistory(patientUuid) {
   }
 
   return Array.isArray(body.entries) ? body.entries : [];
+}
+
+async function callPatient(patientUuid) {
+  const response = await fetch(`${backendUrl}/api/nurses/call`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      patientUuid,
+      message: "Your nurse is ready for you."
+    })
+  });
+  const body = await response.json().catch(() => ({}));
+
+  if (!response.ok || body.ok === false) {
+    throw new Error(body.message || `Patient call failed: ${response.status}`);
+  }
+
+  return body;
+}
+
+async function clearPatientFromQueue(patientUuid) {
+  const response = await fetch(`${backendUrl}/api/nurses/clear`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      patientUuid
+    })
+  });
+  const body = await response.json().catch(() => ({}));
+
+  if (!response.ok || body.ok === false) {
+    throw new Error(body.message || `Clear patient failed: ${response.status}`);
+  }
+
+  return body;
 }
 
 function formatElapsedSince(timestamp) {
@@ -132,6 +174,31 @@ function calculateWaitMinutes(timestamp) {
     return null;
   }
   return Math.max(0, Math.floor((Date.now() - date.getTime()) / 60000));
+}
+
+function calculateAverageWaitMinutes(patientList) {
+  const waits = patientList
+    .map((patient) => calculateWaitMinutes(patient.createdAt))
+    .filter((minutes) => Number.isFinite(minutes));
+  if (waits.length === 0) {
+    return null;
+  }
+  return Math.round(waits.reduce((total, minutes) => total + minutes, 0) / waits.length);
+}
+
+function calculateAverageWaitAfterRemoval(currentStats, removedPatient) {
+  const totalPatients = Number(currentStats.totalPatients);
+  const averageWait = Number(currentStats.averageWaitMinutes);
+  const removedWait = calculateWaitMinutes(removedPatient.createdAt);
+
+  if (!Number.isFinite(totalPatients) || totalPatients <= 1) {
+    return null;
+  }
+  if (!Number.isFinite(averageWait) || !Number.isFinite(removedWait)) {
+    return currentStats.averageWaitMinutes ?? null;
+  }
+
+  return Math.max(0, Math.round(((averageWait * totalPatients) - removedWait) / (totalPatients - 1)));
 }
 
 function formatAverageWait(minutes) {
@@ -442,7 +509,22 @@ function PatientDetail({ patient, history = [], historyError = "", isHistoryLoad
   );
 }
 
-function QueueCard({ patient, selected, onPress }) {
+function QueueCard({ patient, selected, attendStatus, onAttend, onPress, onRemove }) {
+  const longPressTriggeredRef = useRef(false);
+  const isBusy = attendStatus === "sending" || attendStatus === "removing";
+  const attendLabel =
+    attendStatus === "sending"
+      ? "Buzzing..."
+      : attendStatus === "removing"
+        ? "Removing..."
+        : attendStatus === "sent"
+          ? "Buzzed"
+          : attendStatus === "remove-error"
+            ? "Clear Failed"
+            : attendStatus === "error"
+              ? "Not Online"
+              : "Attend Patient";
+
   return (
     <Pressable
       accessibilityRole="button"
@@ -461,9 +543,39 @@ function QueueCard({ patient, selected, onPress }) {
       </Text>
       <View style={styles.queueFooter}>
         <Text style={styles.timeText}>{patient.waitTime}</Text>
-        <View style={styles.attendButton}>
-          <Text style={styles.attendButtonText}>Attend Patient</Text>
-        </View>
+        <Pressable
+          accessibilityRole="button"
+          delayLongPress={650}
+          disabled={isBusy}
+          onLongPress={(event) => {
+            event.stopPropagation?.();
+            longPressTriggeredRef.current = true;
+            onRemove(patient);
+          }}
+          onPress={(event) => {
+            event.stopPropagation?.();
+            if (longPressTriggeredRef.current) {
+              longPressTriggeredRef.current = false;
+              return;
+            }
+            onAttend(patient);
+          }}
+          style={[
+            styles.attendButton,
+            attendStatus === "sent" && styles.attendButtonSent,
+            (attendStatus === "error" || attendStatus === "remove-error") && styles.attendButtonError
+          ]}
+        >
+          <Text
+            style={[
+              styles.attendButtonText,
+              attendStatus === "sent" && styles.attendButtonTextSent,
+              (attendStatus === "error" || attendStatus === "remove-error") && styles.attendButtonTextError
+            ]}
+          >
+            {attendLabel}
+          </Text>
+        </Pressable>
       </View>
     </Pressable>
   );
@@ -558,6 +670,11 @@ export default function App() {
   const [isPatientModalVisible, setIsPatientModalVisible] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [queueError, setQueueError] = useState("");
+  const [queueStats, setQueueStats] = useState({
+    totalPatients: 0,
+    criticalPatients: 0,
+    averageWaitMinutes: null
+  });
   const [isSearchVisible, setIsSearchVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [severityFilter, setSeverityFilter] = useState("All");
@@ -566,6 +683,7 @@ export default function App() {
   const [patientHistory, setPatientHistory] = useState([]);
   const [patientHistoryError, setPatientHistoryError] = useState("");
   const [isPatientHistoryLoading, setIsPatientHistoryLoading] = useState(false);
+  const [attendStatuses, setAttendStatuses] = useState({});
   const previousRanksRef = useRef(new Map());
 
   const loadPatients = useCallback(async ({ showLoading = false } = {}) => {
@@ -573,7 +691,7 @@ export default function App() {
       setIsRefreshing(true);
     }
     try {
-      const queueRows = await fetchPatients();
+      const { patients: queueRows, stats } = await fetchQueue();
       const mappedPatients = queueRows.map(mapQueuePatient);
       const rankedPatients = mappedPatients.map((patient) => {
         const previousRank = previousRanksRef.current.get(patient.id);
@@ -585,6 +703,17 @@ export default function App() {
       });
       previousRanksRef.current = new Map(rankedPatients.map((patient) => [patient.id, patient.rank]));
       setPatients(rankedPatients);
+      setQueueStats({
+        totalPatients: Number.isFinite(Number(stats?.totalPatients))
+          ? Number(stats.totalPatients)
+          : rankedPatients.length,
+        criticalPatients: Number.isFinite(Number(stats?.criticalPatients))
+          ? Number(stats.criticalPatients)
+          : rankedPatients.filter((patient) => patient.category === 1).length,
+        averageWaitMinutes: Number.isFinite(Number(stats?.averageWaitMinutes))
+          ? Number(stats.averageWaitMinutes)
+          : calculateAverageWaitMinutes(rankedPatients)
+      });
       setQueueError("");
       setSelectedPatientId((currentId) => {
         if (currentId && rankedPatients.some((patient) => patient.id === currentId)) {
@@ -650,16 +779,9 @@ export default function App() {
     return patients.find((patient) => patient.id === selectedPatientId) || null;
   }, [patients, selectedPatientId]);
 
-  const criticalCount = patients.filter((patient) => patient.category === 1).length;
-  const averageWaitMinutes = useMemo(() => {
-    const waits = patients
-      .map((patient) => calculateWaitMinutes(patient.createdAt))
-      .filter((minutes) => Number.isFinite(minutes));
-    if (waits.length === 0) {
-      return null;
-    }
-    return Math.round(waits.reduce((total, minutes) => total + minutes, 0) / waits.length);
-  }, [patients]);
+  const totalPatientCount = queueStats.totalPatients;
+  const criticalCount = queueStats.criticalPatients;
+  const averageWaitMinutes = queueStats.averageWaitMinutes;
   const injuryFilterOptions = useMemo(() => {
     return ["All", ...Array.from(new Set(patients.map((patient) => patient.injuryTag))).sort()];
   }, [patients]);
@@ -698,6 +820,79 @@ export default function App() {
     });
   }
 
+  async function handleAttendPatient(patient) {
+    setAttendStatuses((current) => ({
+      ...current,
+      [patient.id]: "sending"
+    }));
+
+    try {
+      await callPatient(patient.id);
+      setAttendStatuses((current) => ({
+        ...current,
+        [patient.id]: "sent"
+      }));
+    } catch (error) {
+      console.warn(`${DEBUG_PREFIX} attend patient failed`, {
+        patientUuid: patient.id,
+        message: error.message
+      });
+      setAttendStatuses((current) => ({
+        ...current,
+        [patient.id]: "error"
+      }));
+      setTimeout(() => {
+        setAttendStatuses((current) => {
+          if (current[patient.id] !== "error") {
+            return current;
+          }
+          const next = { ...current };
+          delete next[patient.id];
+          return next;
+        });
+      }, 1600);
+    }
+  }
+
+  async function handleRemovePatient(patient) {
+    setAttendStatuses((current) => ({
+      ...current,
+      [patient.id]: "removing"
+    }));
+
+    try {
+      await clearPatientFromQueue(patient.id);
+      previousRanksRef.current.delete(patient.id);
+      setPatients((current) => current.filter((item) => item.id !== patient.id));
+      setQueueStats((current) => ({
+        totalPatients: Math.max(0, current.totalPatients - 1),
+        criticalPatients:
+          patient.category === 1
+            ? Math.max(0, current.criticalPatients - 1)
+            : current.criticalPatients,
+        averageWaitMinutes: calculateAverageWaitAfterRemoval(current, patient)
+      }));
+      setAttendStatuses((current) => {
+        const next = { ...current };
+        delete next[patient.id];
+        return next;
+      });
+      if (selectedPatientId === patient.id) {
+        setSelectedPatientId("");
+        setIsPatientModalVisible(false);
+      }
+    } catch (error) {
+      console.warn(`${DEBUG_PREFIX} remove patient failed`, {
+        patientUuid: patient.id,
+        message: error.message
+      });
+      setAttendStatuses((current) => ({
+        ...current,
+        [patient.id]: "remove-error"
+      }));
+    }
+  }
+
   return (
     <SafeAreaView style={styles.screen}>
       <StatusBar style="dark" />
@@ -719,7 +914,7 @@ export default function App() {
 
         <View style={styles.statsRow}>
           <View style={styles.statCard}>
-            <Text style={styles.statValue}>{patients.length}</Text>
+            <Text style={styles.statValue}>{totalPatientCount}</Text>
             <Text style={styles.statLabel}>PATIENTS</Text>
           </View>
           <View style={styles.statCard}>
@@ -780,8 +975,11 @@ export default function App() {
               {filteredPatients.map((patient) => (
                 <QueueCard
                   key={patient.id}
+                  attendStatus={attendStatuses[patient.id]}
                   patient={patient}
                   selected={patient.id === selectedPatientId}
+                  onAttend={handleAttendPatient}
+                  onRemove={handleRemovePatient}
                   onPress={(nextPatient) => {
                     setSelectedPatientId(nextPatient.id);
                     setIsPatientModalVisible(true);
@@ -883,8 +1081,8 @@ export default function App() {
 
 const severityTones = {
   1: { bg: "#f3b0a6", fg: "#d34725" },
-  2: { bg: "#fde1a9", fg: "#e4a424" },
-  3: { bg: "#f7df9a", fg: "#e4bc37" },
+  2: { bg: "#ffd7a3", fg: "#d96b00" },
+  3: { bg: "#f7df9a", fg: "#8a5a00" },
   4: { bg: "#edf1a3", fg: "#d0c638" },
   5: { bg: "#b7d2a2", fg: "#52771e" }
 };
@@ -1528,19 +1726,33 @@ const styles = StyleSheet.create({
   },
   attendButton: {
     alignItems: "center",
-    backgroundColor: "rgba(138, 138, 138, 0.2)",
-    borderColor: "rgba(138, 138, 138, 0.5)",
+    backgroundColor: "#eef4ff",
+    borderColor: "#83abfb",
     borderRadius: 4,
     borderWidth: 1,
     height: 28,
     justifyContent: "center",
     paddingHorizontal: 10
   },
+  attendButtonSent: {
+    backgroundColor: "rgba(137, 183, 72, 0.2)",
+    borderColor: "rgba(137, 183, 72, 0.5)"
+  },
+  attendButtonError: {
+    backgroundColor: "rgba(237, 82, 44, 0.2)",
+    borderColor: "rgba(237, 82, 44, 0.5)"
+  },
   attendButtonText: {
-    color: "#8a8a8a",
+    color: "#0045d0",
     fontFamily,
     fontSize: 12,
     fontWeight: "600"
+  },
+  attendButtonTextSent: {
+    color: "#52771e"
+  },
+  attendButtonTextError: {
+    color: "#ed522c"
   },
   updateCard: {
     backgroundColor: "#ffffff",

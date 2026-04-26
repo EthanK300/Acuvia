@@ -217,6 +217,8 @@ export default function App() {
   const [form, setForm] = useState(initialForm);
   const [mediaFiles, setMediaFiles] = useState([]);
   const [patientUuid, setPatientUuid] = useState("");
+  const [patientWebsocketUrl, setPatientWebsocketUrl] = useState("");
+  const [patientAlert, setPatientAlert] = useState("");
   const [mode, setMode] = useState("new");
   const [status, setStatus] = useState("idle");
   const [message, setMessage] = useState("");
@@ -247,6 +249,7 @@ export default function App() {
         }
 
         setPatientUuid(session.patientUuid);
+        setPatientWebsocketUrl(session.websocketUrl || "");
         setMode("update");
         setMessage("Existing patient session found. Updates will be added to your history.");
       })
@@ -264,6 +267,52 @@ export default function App() {
       isMounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!patientWebsocketUrl) {
+      return undefined;
+    }
+
+    const socket = new WebSocket(patientWebsocketUrl);
+
+    socket.onmessage = (event) => {
+      let payload = {};
+      try {
+        payload = JSON.parse(event.data);
+      } catch {
+        payload = {};
+      }
+
+      if (payload.type !== "nurse-alert") {
+        return;
+      }
+
+      const alertMessage = payload.message || "Your nurse is ready for you.";
+      setPatientAlert(alertMessage);
+      setMessage(alertMessage);
+      setStatus("idle");
+
+      if (navigator.vibrate) {
+        navigator.vibrate([300, 120, 300, 120, 300]);
+      }
+
+      if (window.Notification?.permission === "granted") {
+        new Notification("Acuvia", {
+          body: alertMessage
+        });
+      }
+    };
+
+    socket.onerror = () => {
+      addDebugLog("Patient alert socket error", {
+        websocketUrl: patientWebsocketUrl
+      });
+    };
+
+    return () => {
+      socket.close();
+    };
+  }, [patientWebsocketUrl]);
 
   useEffect(() => {
     if (status !== "submitted" || !patientUuid) {
@@ -425,6 +474,7 @@ export default function App() {
         const created = await createPatientEntry(createPayload);
         activePatientUuid = created.patientUuid;
         setPatientUuid(activePatientUuid);
+        setPatientWebsocketUrl(created.websocketUrl || "");
         setMode("update");
         addDebugLog("Patient row created", {
           patientUuid: activePatientUuid
@@ -488,6 +538,16 @@ export default function App() {
         {message ? (
           <div className={`status-message ${status === "error" ? "error" : ""}`} role="status">
             {message}
+          </div>
+        ) : null}
+
+        {patientAlert ? (
+          <div className="nurse-alert" role="alert">
+            <strong>Nurse ready</strong>
+            <span>{patientAlert}</span>
+            <button type="button" onClick={() => setPatientAlert("")}>
+              Dismiss
+            </button>
           </div>
         ) : null}
 
