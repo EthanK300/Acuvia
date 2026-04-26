@@ -61,6 +61,23 @@ export async function uploadPatientMedia({
   };
 }
 
+export async function createPatientMediaSignedUrl(objectKey, expiresInSeconds = 3600) {
+  if (!objectKey) {
+    return null;
+  }
+
+  const supabase = getSupabaseStorageClient();
+  const { data, error } = await supabase.storage
+    .from(PATIENT_DATA_BUCKET)
+    .createSignedUrl(objectKey, expiresInSeconds);
+
+  if (error) {
+    throw new Error(`Failed to create media URL: ${error.message}`);
+  }
+
+  return data?.signedUrl || null;
+}
+
 export async function clearPatientMedia(patientUuid) {
   const supabase = getSupabaseStorageClient();
   const bucket = supabase.storage.from(PATIENT_DATA_BUCKET);

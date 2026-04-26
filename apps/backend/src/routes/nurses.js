@@ -3,11 +3,12 @@ import { env } from "../config/env.js";
 import {
   clearPatientRecords,
   getPatientStringSummary,
+  listPatientDataHistory,
   listTopPriorityPatients
 } from "../db/patients.js";
 import { buildPatientQrPdf } from "../services/patientPdf.js";
 import { sendPatientAlert } from "../services/patientSockets.js";
-import { clearPatientMedia } from "../services/patientStorage.js";
+import { clearPatientMedia, createPatientMediaSignedUrl } from "../services/patientStorage.js";
 
 export const nursesRouter = Router();
 
@@ -46,6 +47,50 @@ nursesRouter.get("/patient/:patientUuid/summary", async (req, res) => {
     return res.status(500).json({
       ok: false,
       message: "Failed to load patient summary",
+      detail: error.message
+    });
+  }
+});
+
+nursesRouter.get("/patient/:patientUuid/history", async (req, res) => {
+  try {
+    const { patientUuid } = req.params;
+    const history = await listPatientDataHistory(patientUuid);
+    const entries = [];
+
+    for (const row of history) {
+      const payload = row.payload && typeof row.payload === "object" ? row.payload : {};
+      const media = Array.isArray(payload.media) ? payload.media : [];
+      const signedMedia = [];
+
+      for (const item of media) {
+        const url = await createPatientMediaSignedUrl(item.objectKey);
+        signedMedia.push({
+          bucket: item.bucket,
+          objectKey: item.objectKey,
+          mimeType: item.mimeType || "application/octet-stream",
+          url
+        });
+      }
+
+      entries.push({
+        updatedAt: row.updated_at,
+        timestamp: payload.timestamp || row.updated_at,
+        text: typeof payload.text === "string" ? payload.text : null,
+        form: payload.form && typeof payload.form === "object" ? payload.form : null,
+        media: signedMedia
+      });
+    }
+
+    return res.json({
+      ok: true,
+      patientUuid,
+      entries
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to load patient history",
       detail: error.message
     });
   }

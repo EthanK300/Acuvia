@@ -1,8 +1,9 @@
 import { StatusBar } from "expo-status-bar";
 import Constants from "expo-constants";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Image,
   Modal,
   Pressable,
   SafeAreaView,
@@ -94,6 +95,17 @@ async function fetchPatients() {
   }
 }
 
+async function fetchPatientHistory(patientUuid) {
+  const response = await fetch(`${backendUrl}/api/nurses/patient/${patientUuid}/history`);
+  const body = await response.json().catch(() => ({}));
+
+  if (!response.ok || body.ok === false) {
+    throw new Error(body.message || `History request failed: ${response.status}`);
+  }
+
+  return Array.isArray(body.entries) ? body.entries : [];
+}
+
 function formatElapsedSince(timestamp) {
   if (!timestamp) {
     return "--";
@@ -132,6 +144,22 @@ function formatAverageWait(minutes) {
   const hours = Math.floor(minutes / 60);
   const remainder = minutes % 60;
   return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
+}
+
+function formatLogTimestamp(value) {
+  if (!value) {
+    return "--";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "--";
+  }
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  });
 }
 
 function formatBirthday(value) {
@@ -215,6 +243,39 @@ function inferInjuryTag(description) {
   return "General";
 }
 
+function getRankMovement(patient) {
+  const currentRank = Number(patient?.rank);
+  const previousRank =
+    patient?.previousRank == null ? null : Number(patient.previousRank);
+  if (!Number.isFinite(currentRank)) {
+    return {
+      currentRank: null,
+      previousRank: null,
+      tone: "neutral"
+    };
+  }
+  if (!Number.isFinite(previousRank)) {
+    return {
+      currentRank,
+      previousRank: null,
+      tone: "neutral"
+    };
+  }
+  if (previousRank === currentRank) {
+    return {
+      currentRank,
+      previousRank,
+      tone: "neutral"
+    };
+  }
+
+  return {
+    currentRank,
+    previousRank,
+    tone: currentRank < previousRank ? "up" : "down"
+  };
+}
+
 function LogoMark() {
   return (
     <View style={styles.logoMark} accessibilityLabel="Acuvia logo">
@@ -277,7 +338,45 @@ function SearchButton({ active, onPress }) {
   );
 }
 
-function PatientDetail({ patient }) {
+function PatientLogEntry({ entry, index }) {
+  const mediaItems = Array.isArray(entry.media) ? entry.media : [];
+
+  return (
+    <View style={styles.logEntry}>
+      <View style={styles.logEntryHeader}>
+        <Text style={styles.logEntryTitle}>{index === 0 ? "Initial submission" : `Update ${index}`}</Text>
+        <Text style={styles.logEntryTime}>{formatLogTimestamp(entry.updatedAt || entry.timestamp)}</Text>
+      </View>
+      {entry.text ? <Text style={styles.logEntryText}>{entry.text}</Text> : null}
+      {mediaItems.length > 0 ? (
+        <View style={styles.mediaGrid}>
+          {mediaItems.map((item) => {
+            const isImage = String(item.mimeType || "").startsWith("image/");
+            return (
+              <View key={item.objectKey || item.url} style={styles.mediaTile}>
+                {isImage && item.url ? (
+                  <Image source={{ uri: item.url }} style={styles.mediaImage} />
+                ) : (
+                  <View style={styles.mediaFileTile}>
+                    <Text style={styles.mediaFileText}>Media</Text>
+                  </View>
+                )}
+                <Text numberOfLines={1} style={styles.mediaMetaText}>
+                  {item.mimeType || "attachment"}
+                </Text>
+              </View>
+            );
+          })}
+        </View>
+      ) : null}
+      {!entry.text && mediaItems.length === 0 ? (
+        <Text style={styles.logEntryEmpty}>No message text or media in this entry.</Text>
+      ) : null}
+    </View>
+  );
+}
+
+function PatientDetail({ patient, history = [], historyError = "", isHistoryLoading = false }) {
   if (!patient) {
     return (
       <View style={[styles.detailPanel, styles.emptyDetailPanel]}>
@@ -322,6 +421,23 @@ function PatientDetail({ patient }) {
           <Text style={styles.intakeValue}>{patient.submittedText}</Text>
         </View>
       </View>
+
+      <View style={styles.logSection}>
+        <Text style={styles.logSectionTitle}>Message Logs + Media</Text>
+        {isHistoryLoading ? (
+          <View style={styles.logStatusRow}>
+            <ActivityIndicator color="#0045d0" size="small" />
+            <Text style={styles.logStatusText}>Loading patient history...</Text>
+          </View>
+        ) : null}
+        {historyError ? <Text style={styles.logErrorText}>{historyError}</Text> : null}
+        {!isHistoryLoading && !historyError && history.length === 0 ? (
+          <Text style={styles.logEntryEmpty}>No message logs found for this patient.</Text>
+        ) : null}
+        {history.map((entry, index) => (
+          <PatientLogEntry entry={entry} index={index} key={`${entry.updatedAt || index}-${index}`} />
+        ))}
+      </View>
     </View>
   );
 }
@@ -337,10 +453,6 @@ function QueueCard({ patient, selected, onPress }) {
         <View style={styles.patientNameLine}>
           <Text style={styles.rankText}>#{patient.rank}</Text>
           <Text style={styles.queueName}>{patient.name}</Text>
-          {patient.category <= 2 ? <View style={styles.alertDot} /> : null}
-          <View style={styles.injuryPill}>
-            <Text style={styles.injuryPillText}>{patient.injuryTag}</Text>
-          </View>
         </View>
         <SeverityBadge category={patient.category} compact />
       </View>
@@ -358,6 +470,9 @@ function QueueCard({ patient, selected, onPress }) {
 }
 
 function UpdateCard({ patient }) {
+  const rankMovement = getRankMovement(patient);
+  const hasPreviousRank = Number.isFinite(rankMovement.previousRank);
+
   return (
     <View style={styles.updateCard}>
       <View style={styles.updateMain}>
@@ -369,6 +484,21 @@ function UpdateCard({ patient }) {
       <Text style={styles.queueDescription} numberOfLines={2}>
         {patient.submittedText}
       </Text>
+      <View
+        style={[
+          styles.rankMovementBox,
+          rankMovement.tone === "up" && styles.rankMovementBoxUp,
+          rankMovement.tone === "down" && styles.rankMovementBoxDown
+        ]}
+      >
+        {hasPreviousRank ? (
+          <>
+            <Text style={styles.rankMovementNumber}>{rankMovement.previousRank}</Text>
+            <Text style={styles.rankMovementArrow}>-&gt;</Text>
+          </>
+        ) : null}
+        <Text style={styles.rankMovementNumber}>{rankMovement.currentRank ?? "--"}</Text>
+      </View>
       <View style={styles.updateFooter}>
         <Text style={styles.timeText}>{patient.updateTime}</Text>
         <View style={styles.updateActions}>
@@ -433,6 +563,10 @@ export default function App() {
   const [severityFilter, setSeverityFilter] = useState("All");
   const [injuryFilter, setInjuryFilter] = useState("All");
   const [activeDropdown, setActiveDropdown] = useState(null);
+  const [patientHistory, setPatientHistory] = useState([]);
+  const [patientHistoryError, setPatientHistoryError] = useState("");
+  const [isPatientHistoryLoading, setIsPatientHistoryLoading] = useState(false);
+  const previousRanksRef = useRef(new Map());
 
   const loadPatients = useCallback(async ({ showLoading = false } = {}) => {
     if (showLoading) {
@@ -441,10 +575,19 @@ export default function App() {
     try {
       const queueRows = await fetchPatients();
       const mappedPatients = queueRows.map(mapQueuePatient);
-      setPatients(mappedPatients);
+      const rankedPatients = mappedPatients.map((patient) => {
+        const previousRank = previousRanksRef.current.get(patient.id);
+        return {
+          ...patient,
+          previousRank: Number.isFinite(previousRank) ? previousRank : null,
+          rankDelta: Number.isFinite(previousRank) ? previousRank - patient.rank : 0
+        };
+      });
+      previousRanksRef.current = new Map(rankedPatients.map((patient) => [patient.id, patient.rank]));
+      setPatients(rankedPatients);
       setQueueError("");
       setSelectedPatientId((currentId) => {
-        if (currentId && mappedPatients.some((patient) => patient.id === currentId)) {
+        if (currentId && rankedPatients.some((patient) => patient.id === currentId)) {
           return currentId;
         }
         setIsPatientModalVisible(false);
@@ -466,6 +609,42 @@ export default function App() {
     }, 5000);
     return () => clearInterval(intervalId);
   }, [loadPatients]);
+
+  useEffect(() => {
+    let isActive = true;
+
+    async function loadPatientHistory() {
+      if (!isPatientModalVisible || !selectedPatientId) {
+        setPatientHistory([]);
+        setPatientHistoryError("");
+        setIsPatientHistoryLoading(false);
+        return;
+      }
+
+      setIsPatientHistoryLoading(true);
+      setPatientHistoryError("");
+      try {
+        const entries = await fetchPatientHistory(selectedPatientId);
+        if (isActive) {
+          setPatientHistory(entries);
+        }
+      } catch (error) {
+        if (isActive) {
+          setPatientHistory([]);
+          setPatientHistoryError(error.message || "Failed to load patient history");
+        }
+      } finally {
+        if (isActive) {
+          setIsPatientHistoryLoading(false);
+        }
+      }
+    }
+
+    loadPatientHistory();
+    return () => {
+      isActive = false;
+    };
+  }, [isPatientModalVisible, selectedPatientId]);
 
   const selectedPatient = useMemo(() => {
     return patients.find((patient) => patient.id === selectedPatientId) || null;
@@ -505,7 +684,9 @@ export default function App() {
       return matchesSearch && matchesSeverity && matchesInjury;
     });
   }, [injuryFilter, patients, searchQuery, severityFilter]);
-  const updates = filteredPatients.filter((patient) => patient.hasUpdate).slice(0, 6);
+  const updates = filteredPatients
+    .filter((patient) => patient.previousRank != null && patient.previousRank !== patient.rank)
+    .slice(0, 6);
 
   function toggleSearch() {
     setIsSearchVisible((isVisible) => {
@@ -636,13 +817,13 @@ export default function App() {
               </View>
             </View>
             <View style={styles.cardStack}>
-              {(updates.length ? updates : filteredPatients.slice(0, 3)).map((patient) => (
+              {updates.map((patient) => (
                 <UpdateCard key={patient.id} patient={patient} />
               ))}
-              {filteredPatients.length === 0 ? (
+              {updates.length === 0 ? (
                 <View style={styles.emptyQueueCard}>
-                  <Text style={styles.emptyQueueTitle}>No matching updates</Text>
-                  <Text style={styles.emptyQueueText}>Filters apply to patient updates too.</Text>
+                  <Text style={styles.emptyQueueTitle}>No rank changes</Text>
+                  <Text style={styles.emptyQueueText}>Patient updates appear here only when priority changes.</Text>
                 </View>
               ) : null}
             </View>
@@ -669,7 +850,12 @@ export default function App() {
               </Pressable>
             </View>
             <ScrollView>
-              <PatientDetail patient={selectedPatient} />
+              <PatientDetail
+                history={patientHistory}
+                historyError={patientHistoryError}
+                isHistoryLoading={isPatientHistoryLoading}
+                patient={selectedPatient}
+              />
             </ScrollView>
           </Pressable>
         </Pressable>
@@ -855,7 +1041,7 @@ const styles = StyleSheet.create({
   },
   statCard: {
     backgroundColor: "#ffffff",
-    borderColor: "#e7e7e7",
+    borderColor: "#cbd9ff",
     borderRadius: 8,
     borderWidth: 1,
     flex: 1,
@@ -995,6 +1181,113 @@ const styles = StyleSheet.create({
     lineHeight: 19,
     marginTop: 2
   },
+  logSection: {
+    borderTopColor: "#e7e7e7",
+    borderTopWidth: 1,
+    gap: 10,
+    marginTop: 6,
+    paddingTop: 16
+  },
+  logSectionTitle: {
+    color: "#000000",
+    fontFamily,
+    fontSize: 20,
+    fontWeight: "900"
+  },
+  logStatusRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 8
+  },
+  logStatusText: {
+    color: "#5a5a5a",
+    fontFamily,
+    fontSize: 14,
+    fontWeight: "700"
+  },
+  logErrorText: {
+    color: "#9d241b",
+    fontFamily,
+    fontSize: 14,
+    fontWeight: "800"
+  },
+  logEntry: {
+    backgroundColor: "#ffffff",
+    borderColor: "#e7e7e7",
+    borderRadius: 8,
+    borderWidth: 1,
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 12
+  },
+  logEntryHeader: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between"
+  },
+  logEntryTitle: {
+    color: "#151515",
+    fontFamily,
+    fontSize: 16,
+    fontWeight: "900"
+  },
+  logEntryTime: {
+    color: "#8a8a8a",
+    fontFamily,
+    fontSize: 13,
+    fontWeight: "700"
+  },
+  logEntryText: {
+    color: "#151515",
+    fontFamily,
+    fontSize: 15,
+    lineHeight: 20
+  },
+  logEntryEmpty: {
+    color: "#8a8a8a",
+    fontFamily,
+    fontSize: 14,
+    fontWeight: "700"
+  },
+  mediaGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10
+  },
+  mediaTile: {
+    width: 118
+  },
+  mediaImage: {
+    backgroundColor: "#eef4ff",
+    borderColor: "#cbd9ff",
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 88,
+    width: 118
+  },
+  mediaFileTile: {
+    alignItems: "center",
+    backgroundColor: "#eef4ff",
+    borderColor: "#cbd9ff",
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 88,
+    justifyContent: "center",
+    width: 118
+  },
+  mediaFileText: {
+    color: "#000000",
+    fontFamily,
+    fontSize: 14,
+    fontWeight: "900"
+  },
+  mediaMetaText: {
+    color: "#5a5a5a",
+    fontFamily,
+    fontSize: 11,
+    fontWeight: "700",
+    marginTop: 4
+  },
   columns: {
     flexDirection: "row",
     gap: 18
@@ -1010,7 +1303,7 @@ const styles = StyleSheet.create({
   sectionHeader: {
     alignItems: "center",
     backgroundColor: "#ffffff",
-    borderColor: "#e7e7e7",
+    borderColor: "#cbd9ff",
     borderRadius: 8,
     borderWidth: 1,
     flexDirection: "row",
@@ -1041,6 +1334,7 @@ const styles = StyleSheet.create({
     width: 32
   },
   searchButtonActive: {
+    backgroundColor: "#eef4ff",
     borderColor: "#0045d0"
   },
   magnifierIcon: {
@@ -1116,6 +1410,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8
   },
   filterPillActive: {
+    backgroundColor: "#eef4ff",
     borderColor: "#0045d0"
   },
   filterText: {
@@ -1170,7 +1465,9 @@ const styles = StyleSheet.create({
     paddingVertical: 16
   },
   queueCardSelected: {
-    borderColor: "#cbd9ff"
+    borderColor: "#0045d0",
+    borderLeftColor: "#0045d0",
+    borderLeftWidth: 5
   },
   cardTopLine: {
     alignItems: "center",
@@ -1196,12 +1493,6 @@ const styles = StyleSheet.create({
     fontSize: 23,
     fontWeight: "700",
     lineHeight: 27
-  },
-  alertDot: {
-    backgroundColor: "#ed522c",
-    borderRadius: 3,
-    height: 5,
-    width: 5
   },
   injuryPill: {
     backgroundColor: "#eaeaea",
@@ -1253,7 +1544,7 @@ const styles = StyleSheet.create({
   },
   updateCard: {
     backgroundColor: "#ffffff",
-    borderColor: "#e7e7e7",
+    borderColor: "#d8e3ff",
     borderRadius: 8,
     borderWidth: 1,
     minHeight: 126,
@@ -1271,6 +1562,40 @@ const styles = StyleSheet.create({
     fontSize: 23,
     fontWeight: "600",
     lineHeight: 27
+  },
+  rankMovementBox: {
+    alignItems: "center",
+    alignSelf: "flex-start",
+    backgroundColor: "rgba(138, 138, 138, 0.14)",
+    borderColor: "rgba(138, 138, 138, 0.35)",
+    borderRadius: 6,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 7,
+    marginTop: 10,
+    minHeight: 30,
+    paddingHorizontal: 10,
+    paddingVertical: 4
+  },
+  rankMovementBoxUp: {
+    backgroundColor: "rgba(137, 183, 72, 0.22)",
+    borderColor: "rgba(137, 183, 72, 0.55)"
+  },
+  rankMovementBoxDown: {
+    backgroundColor: "rgba(237, 82, 44, 0.2)",
+    borderColor: "rgba(237, 82, 44, 0.5)"
+  },
+  rankMovementNumber: {
+    color: "#5a5a5a",
+    fontFamily,
+    fontSize: 16,
+    fontWeight: "900"
+  },
+  rankMovementArrow: {
+    color: "#5a5a5a",
+    fontFamily,
+    fontSize: 16,
+    fontWeight: "900"
   },
   updateFooter: {
     alignItems: "center",
@@ -1421,6 +1746,6 @@ const styles = StyleSheet.create({
     fontWeight: "700"
   },
   dropdownOptionTextSelected: {
-    color: "#0045d0"
+    color: "#000000"
   }
 });
