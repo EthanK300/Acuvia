@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import acuviaLogo from "./assets/acuvia-logo.png";
 import "./App.css";
 
 const backendUrl = import.meta.env.VITE_BACKEND_URL || "http://localhost:4000";
@@ -23,7 +24,7 @@ const selectFields = [
   {
     id: "areaOfPain",
     label: "Area of Pain",
-    options: ["Head", "Chest", "Abdomen", "Back", "Arm or Hand", "Leg or Foot", "Other"]
+    options: ["Head", "Chest", "Abdomen", "Back", "Arm or Hand", "Leg or Foot", "Skin", "Other"]
   },
   {
     id: "painLevel",
@@ -136,6 +137,7 @@ export default function App() {
   const [mode, setMode] = useState("new");
   const [status, setStatus] = useState("idle");
   const [message, setMessage] = useState("");
+  const [isListening, setIsListening] = useState(false);
 
   const isExistingPatient = mode === "update" && patientUuid;
 
@@ -184,6 +186,49 @@ export default function App() {
 
   function handleMediaChange(event) {
     setMediaFiles(Array.from(event.target.files || []));
+  }
+
+  function handleSpeechToText() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      setStatus("error");
+      setMessage("Speech to text is not supported in this browser.");
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => {
+      setIsListening(true);
+      setMessage("Listening...");
+    };
+
+    recognition.onerror = () => {
+      setIsListening(false);
+      setStatus("error");
+      setMessage("Could not capture audio. Please try again or type your answer.");
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+    };
+
+    recognition.onresult = (event) => {
+      const transcript = event.results?.[0]?.[0]?.transcript || "";
+      if (!transcript) {
+        return;
+      }
+
+      updateField("reason", form.reason ? `${form.reason} ${transcript}` : transcript);
+      setStatus("idle");
+      setMessage("");
+    };
+
+    recognition.start();
   }
 
   async function submitMedia(patientId) {
@@ -249,15 +294,11 @@ export default function App() {
     <main className="patient-page">
       <section className="form-shell" aria-labelledby="patient-form-title">
         <header className="brand-header">
-          <div className="brand-mark" aria-hidden="true">
-            <span />
-            <span />
-            <i />
-          </div>
-          <div>
+          <div className="brand-title-row">
+            <img className="brand-logo" src={acuviaLogo} alt="" aria-hidden="true" />
             <h1 id="patient-form-title">Acuvia</h1>
-            <p>We care. Let us know how you feel.</p>
           </div>
+          <p>We care. Let us know how you feel.</p>
         </header>
 
         {message ? (
@@ -279,14 +320,13 @@ export default function App() {
         <form className={status === "submitted" ? "hidden-form" : ""} onSubmit={handleSubmit}>
           {!isExistingPatient ? (
             <fieldset className="identity-grid">
-              <legend>Patient Information</legend>
               <label>
                 First Name <strong>*</strong>
                 <input
                   required
                   value={form.firstName}
                   onChange={(event) => updateField("firstName", event.target.value)}
-                  placeholder="First name"
+                  placeholder="First"
                 />
               </label>
               <label>
@@ -295,7 +335,7 @@ export default function App() {
                   required
                   value={form.lastName}
                   onChange={(event) => updateField("lastName", event.target.value)}
-                  placeholder="Last name"
+                  placeholder="Last"
                 />
               </label>
               <label>
@@ -378,11 +418,19 @@ export default function App() {
           </label>
 
           <label className="field-label">
-            What is the main reason you are here today?
+            What is the main reason you're here today?
             <strong>*</strong>
-            <span className="voice-indicator" aria-hidden="true">
-              mic
-            </span>
+            <button
+              type="button"
+              className={`microphone-button ${isListening ? "listening" : ""}`}
+              onClick={handleSpeechToText}
+              aria-label="Use microphone for speech to text"
+            >
+              <svg aria-hidden="true" viewBox="0 0 24 24">
+                <path d="M12 14c1.66 0 3-1.34 3-3V6c0-1.66-1.34-3-3-3S9 4.34 9 6v5c0 1.66 1.34 3 3 3Z" />
+                <path d="M17.3 11c0 2.93-2.38 5.3-5.3 5.3S6.7 13.93 6.7 11H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-1.7Z" />
+              </svg>
+            </button>
             <textarea
               required
               value={form.reason}
