@@ -1,6 +1,32 @@
 # Acuvia
 
-Acuvia is a triage workflow app with:
+Acuvia is a patient intake and nurse triage coordination platform designed for fast-moving care settings (such as urgent care events, pop-up clinics, and constrained hospital intake flows). It helps teams move from "first come, first served" toward clinically prioritized care while keeping patients informed.
+
+At a high level, patients submit their condition details (and optional media), the backend uses AI to suggest severity and queue placement, and nurses retain final control over triage-impacting updates through approve/reject review actions.
+
+## Why This Helps
+
+### For patients
+
+- Faster recognition of worsening conditions instead of waiting for manual re-triage.
+- Clearer communication path for updates after initial check-in.
+- Better transparency through wait-time feedback and nurse-call alerts.
+
+### For nurses and triage staff
+
+- A live prioritized queue that reflects severity and urgency rather than arrival order alone.
+- A focused "pending updates" review lane so meaningful patient condition changes are surfaced quickly.
+- Final clinical authority: AI proposes, nurse approves or rejects.
+
+### For operations and care quality
+
+- More consistent triage suggestions with structured AI output.
+- Better traceability of updates, decisions, and media-linked evidence.
+- Reduced manual overhead in identifying which updates should trigger reprioritization.
+
+## Project Components
+
+Acuvia is implemented as a monorepo with:
 
 - `apps/backend`: Node.js + Express API, WebSocket patient alerts, Supabase Postgres + Storage, Gemini AI triage/ranking.
 - `apps/nurse-ui`: React Native (Expo) nurse interface.
