@@ -119,3 +119,63 @@ export async function classifyPatientIntake(intake) {
   const parsed = parseJsonFromModelText(raw);
   return normalizeIntakeOutput(parsed);
 }
+
+function waitMinutesFromTimestamp(timestamp) {
+  const createdAt = new Date(timestamp).getTime();
+  if (Number.isNaN(createdAt)) {
+    return 0;
+  }
+  return Math.max(0, Math.floor((Date.now() - createdAt) / 60000));
+}
+
+function normalizeCaseComparisonOutput(output) {
+  if (!output || typeof output !== "object") {
+    throw new Error("AI comparison output must be an object");
+  }
+
+  const verdict = String(output.verdict || "").toLowerCase().trim();
+  if (!["more_severe", "less_severe", "equal"].includes(verdict)) {
+    throw new Error("AI comparison verdict must be one of: more_severe, less_severe, equal");
+  }
+
+  return {
+    verdict,
+    rationale: String(output.rationale || "").trim()
+  };
+}
+
+export async function compareCasesForRanking(targetCase, referenceCase) {
+  const model = getGeminiModel();
+  const prompt = [
+    "You are an emergency triage ranking assistant.",
+    "Compare the TARGET case against the REFERENCE case for ordering within the same ESI category.",
+    "Return JSON only with keys: verdict, rationale.",
+    'verdict must be one of: "more_severe", "less_severe", "equal".',
+    "Use this context for ESI:",
+    "ESI 1 — Immediate (Resuscitation): life-saving intervention now.",
+    "ESI 2 — Emergent (High risk): stable but can deteriorate quickly.",
+    "ESI 3 — Urgent: needs multiple resources.",
+    "ESI 4 — Less urgent.",
+    "ESI 5 — Non-urgent.",
+    "When comparing within the same category, consider incident description details and elapsed waiting time from created_at.",
+    "TARGET:",
+    JSON.stringify({
+      description: targetCase.description || "",
+      latestText: targetCase.latest_payload?.text || "",
+      createdAt: targetCase.created_at,
+      waitMinutes: waitMinutesFromTimestamp(targetCase.created_at)
+    }),
+    "REFERENCE:",
+    JSON.stringify({
+      description: referenceCase.description || "",
+      latestText: referenceCase.latest_payload?.text || "",
+      createdAt: referenceCase.created_at,
+      waitMinutes: waitMinutesFromTimestamp(referenceCase.created_at)
+    })
+  ].join("\n");
+
+  const result = await model.generateContent(prompt);
+  const raw = result.response.text();
+  const parsed = parseJsonFromModelText(raw);
+  return normalizeCaseComparisonOutput(parsed);
+}

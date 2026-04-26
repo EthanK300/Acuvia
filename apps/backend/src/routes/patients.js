@@ -11,6 +11,7 @@ import {
   readCookieValue
 } from "../services/session.js";
 import { classifyPatientIntake } from "../services/aiTriage.js";
+import { enqueueRankingEvent } from "../services/rankingQueue.js";
 import { uploadPatientMedia } from "../services/patientStorage.js";
 
 export const patientsRouter = Router();
@@ -141,6 +142,7 @@ patientsRouter.post("/", async (req, res) => {
       sessionStart: startedAt,
       sessionExpiresAt: expiresAt
     });
+    enqueueRankingEvent(patient.uuid, "create");
     console.log("[patients] create success", {
       patientUuid: patient.uuid
     });
@@ -253,6 +255,7 @@ patientsRouter.patch("/:patientUuid", async (req, res) => {
       patientUuid,
       payload
     });
+    enqueueRankingEvent(patientUuid, "update");
     console.log("[patients] update success", {
       patientUuid,
       dataId: saved.id

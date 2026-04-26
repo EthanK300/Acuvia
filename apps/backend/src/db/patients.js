@@ -11,6 +11,29 @@ export async function getPatientBySessionUuid(patientUuid) {
   return result.rows[0] || null;
 }
 
+export async function getPatientForRanking(patientUuid) {
+  const result = await pool.query(
+    `select
+       p.uuid,
+       p.category,
+       p.description,
+       p.created_at,
+       latest_data.payload as latest_payload
+     from patients p
+     left join lateral (
+       select pd.payload
+       from patient_data pd
+       where pd.patient_uuid = p.uuid
+       order by pd.updated_at desc
+       limit 1
+     ) latest_data on true
+     where p.uuid = $1`,
+    [patientUuid]
+  );
+
+  return result.rows[0] || null;
+}
+
 export async function createPatientWithSession({
   category,
   firstName,
@@ -99,6 +122,55 @@ export async function listTopPriorityPatients(limit = 50) {
   );
 
   return result.rows;
+}
+
+export async function listCategoryPatientsForRanking(category) {
+  const result = await pool.query(
+    `select
+       p.uuid,
+       p.category,
+       p.number_rank,
+       p.description,
+       p.created_at,
+       latest_data.payload as latest_payload
+     from patients p
+     left join lateral (
+       select pd.payload
+       from patient_data pd
+       where pd.patient_uuid = p.uuid
+       order by pd.updated_at desc
+       limit 1
+     ) latest_data on true
+     where p.category = $1`,
+    [category]
+  );
+
+  return result.rows;
+}
+
+export async function updateCategoryRanks(assignments) {
+  if (!Array.isArray(assignments) || assignments.length === 0) {
+    return;
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    for (const assignment of assignments) {
+      await client.query(
+        `update patients
+         set number_rank = $1
+         where uuid = $2`,
+        [assignment.numberRank, assignment.patientUuid]
+      );
+    }
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 function collectStringsFromValue(value, collector) {
