@@ -190,34 +190,21 @@ export async function listTopPriorityPatients(limit = 50) {
   return result.rows;
 }
 
-export async function markPatientUpdateReviewed({ payloadId, patientUuid, decision }) {
-  const normalizedDecision = String(decision || "").toLowerCase();
-  const mappedDecision =
-    normalizedDecision === "approve" || normalizedDecision === "approved"
-      ? "approved"
-      : normalizedDecision === "reject" || normalizedDecision === "rejected"
-        ? "rejected"
-        : "";
-  if (!mappedDecision) {
-    throw new Error("decision must be approve or reject");
-  }
-
+export async function getPatientQueueStats() {
   const result = await pool.query(
-    `update patient_data
-     set payload = jsonb_set(
-       jsonb_set(payload, '{nurseReview,status}', to_jsonb($1::text), true),
-       '{nurseReview,reviewedAt}',
-       to_jsonb(now()::text),
-       true
-     )
-     where id = $2
-       and patient_uuid = $3
-       and coalesce(payload->>'type', '') = 'patient_update'
-     returning id, patient_uuid, payload, updated_at`,
-    [mappedDecision, payloadId, patientUuid]
+    `select
+       count(*)::integer as total_patients,
+       count(*) filter (where category = 1)::integer as critical_patients,
+       round(avg(extract(epoch from (now() - created_at)) / 60))::integer as average_wait_minutes
+     from patients`
   );
 
-  return result.rows[0] || null;
+  const row = result.rows[0] || {};
+  return {
+    totalPatients: row.total_patients ?? 0,
+    criticalPatients: row.critical_patients ?? 0,
+    averageWaitMinutes: row.average_wait_minutes ?? null
+  };
 }
 
 export async function listCategoryPatientsForRanking(category) {
