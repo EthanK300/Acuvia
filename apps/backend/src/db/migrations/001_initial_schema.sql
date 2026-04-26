@@ -7,7 +7,7 @@ create table if not exists patients (
   uuid uuid primary key default gen_random_uuid(),
   -- Rank is local within category (1 = most severe inside that category).
   number_rank integer,
-  -- ESI triage level:
+  -- ESI triage level stored as integer (not enum text):
   -- 1 = Immediate (Resuscitation)
   -- 2 = Emergent (High risk)
   -- 3 = Urgent (Needs multiple resources)

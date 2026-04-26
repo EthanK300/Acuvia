@@ -52,9 +52,11 @@ const backendUrl =
 const DEBUG_PREFIX = "[nurse-ui]";
 
 function categoryToSeverity(category) {
-  if (category === 1) return "critical";
-  if (category === 2) return "urgent";
-  return "non urgent";
+  if (category === 1) return "esi 1";
+  if (category === 2) return "esi 2";
+  if (category === 3) return "esi 3";
+  if (category === 4) return "esi 4";
+  return "esi 5";
 }
 
 async function fetchPatients() {
@@ -143,12 +145,6 @@ function requestDownloadableAppBuild() {
 }
 
 function getSeverityStyle(severity) {
-  if (severity === "urgent") {
-    return severityStyles.high;
-  }
-  if (severity === "non urgent") {
-    return severityStyles.low;
-  }
   return severityStyles[severity] || severityStyles.low;
 }
 
@@ -196,7 +192,7 @@ export default function App() {
   const prioritizedPatients = useMemo(() => patients, [patients]);
 
   const criticalCount = prioritizedPatients.filter((patient) => {
-    return patient.severity === "critical";
+    return patient.severity === "esi 1";
   }).length;
 
   return (
@@ -306,7 +302,7 @@ export default function App() {
 }
 
 const severityStyles = StyleSheet.create({
-  critical: {
+  "esi 1": {
     badge: {
       backgroundColor: "#ffe1df"
     },
@@ -314,7 +310,7 @@ const severityStyles = StyleSheet.create({
       color: "#9d241b"
     }
   },
-  high: {
+  "esi 2": {
     badge: {
       backgroundColor: "#fff0cf"
     },
@@ -322,12 +318,28 @@ const severityStyles = StyleSheet.create({
       color: "#7a4b00"
     }
   },
-  moderate: {
+  "esi 3": {
     badge: {
       backgroundColor: "#dfefff"
     },
     text: {
       color: "#15548a"
+    }
+  },
+  "esi 4": {
+    badge: {
+      backgroundColor: "#e8f4df"
+    },
+    text: {
+      color: "#2a6a1d"
+    }
+  },
+  "esi 5": {
+    badge: {
+      backgroundColor: "#dff4e8"
+    },
+    text: {
+      color: "#19633d"
     }
   },
   low: {
